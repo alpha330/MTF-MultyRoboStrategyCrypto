@@ -13,14 +13,14 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/root/MTF-MultyRoboStrategyCrypto/initialBot/trading_bot.log'),  # ذخیره لاگ‌ها تو فایل
+        logging.FileHandler('/root/MTF-MultyRoboStrategyCrypto/initialBot/trading_bot_ATR_PLUS.log'),  # ذخیره لاگ‌ها تو فایل
         logging.StreamHandler()  # نمایش لاگ‌ها تو کنسول
     ]
 )
 logger = logging.getLogger(__name__)
 
 # بارگذاری متغیرهای محیطی
-load_dotenv("../.env")
+load_dotenv()
 API_KEY = os.getenv('BYBIT_TESTNET_API_KEY')
 API_SECRET = os.getenv('BYBIT_TESTNET_API_SECRET')
 
@@ -30,7 +30,7 @@ def get_utc_timestamp():
 
 class TradingBot:
     def __init__(self, symbol, timeframe, indicators, higher_timeframe=None, leverage=5, risk_percent=0.01):
-        self.symbol = symbol  # فرمت: BTC/USDT:USDT
+        self.symbol = symbol
         self.timeframe = timeframe
         self.indicators = indicators
         self.higher_timeframe = higher_timeframe
@@ -45,13 +45,11 @@ class TradingBot:
         self.exchange.set_sandbox_mode(True)
         self.exchange.nonce = get_utc_timestamp
 
-        # تنظیم بازار Linear Futures
         self.exchange.load_markets()
         if self.symbol not in self.exchange.markets:
             logger.error(f"سمبل {self.symbol} در بازار موجود نیست")
             raise ValueError(f"سمبل {self.symbol} پشتیبانی نمی‌شود")
 
-        # تنظیم لوریج
         self._set_leverage()
 
     def _set_leverage(self):
@@ -93,14 +91,15 @@ class TradingBot:
         for indicator in self.indicators:
             if indicator == 'RSI':
                 indicators_data['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-            elif indicator == 'MACD':
-                macd = ta.trend.MACD(df['close'])
-                indicators_data['MACD'] = macd.macd()
-                indicators_data['MACD_Signal'] = macd.macd_signal()
-            elif indicator == 'Bollinger':
-                bb = ta.volatility.BollingerBands(df['close'], window=20)
-                indicators_data['BB_Upper'] = bb.bollinger_hband()
-                indicators_data['BB_Lower'] = bb.bollinger_lband()
+            elif indicator == 'Stochastic':
+                stoch = ta.momentum.StochasticOscillator(df['high'], df['low'], df['close'], window=14, smooth_window=3)
+                indicators_data['Stoch_K'] = stoch.stoch()
+                indicators_data['Stoch_D'] = stoch.stoch_signal()
+            elif indicator == 'ADX':
+                adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
+                indicators_data['ADX'] = adx.adx()
+                indicators_data['Plus_DI'] = adx.adx_pos()
+                indicators_data['Minus_DI'] = adx.adx_neg()
             elif indicator == 'EMA':
                 indicators_data['EMA20'] = ta.trend.EMAIndicator(df['close'], window=20).ema_indicator()
                 indicators_data['EMA50'] = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
@@ -116,19 +115,21 @@ class TradingBot:
         if df_higher is None or df_higher.empty:
             return 'Neutral'
         indicators_higher = self.calculate_indicators(df_higher)
-        macd = indicators_higher.get('MACD')
-        macd_signal = indicators_higher.get('MACD_Signal')
         ema20 = indicators_higher.get('EMA20')
         ema50 = indicators_higher.get('EMA50')
-        if macd is None or macd_signal is None or ema20 is None or ema50 is None:
+        adx = indicators_higher.get('ADX')
+        plus_di = indicators_higher.get('Plus_DI')
+        minus_di = indicators_higher.get('Minus_DI')
+        if any(x is None for x in [ema20, ema50, adx, plus_di, minus_di]):
             return 'Neutral'
-        macd = macd.iloc[-1]
-        macd_signal = macd_signal.iloc[-1]
         ema20 = ema20.iloc[-1]
         ema50 = ema50.iloc[-1]
-        if macd > macd_signal and ema20 > ema50:
+        adx = adx.iloc[-1]
+        plus_di = plus_di.iloc[-1]
+        minus_di = minus_di.iloc[-1]
+        if adx > 25 and ema20 > ema50 and plus_di > minus_di:
             return 'Long'
-        elif macd < macd_signal and ema20 < ema50:
+        elif adx > 25 and ema20 < ema50 and minus_di > plus_di:
             return 'Short'
         return 'Neutral'
 
@@ -139,6 +140,17 @@ class TradingBot:
             logger.error("فاصله استاپ لاس صفر است، نمی‌توان سایز پوزیشن را محاسبه کرد")
             return 0
         return risk_amount / stop_loss_distance
+
+    def get_open_position(self):
+        try:
+            positions = self.exchange.fetch_positions([self.symbol], params={'category': 'linear'})
+            for pos in positions:
+                if pos['symbol'] == self.symbol and pos['contracts'] > 0:
+                    return pos
+            return None
+        except Exception as e:
+            logger.error(f"خطا در گرفتن پوزیشن‌ها: {e}")
+            return None
 
     def close_position(self, position):
         try:
@@ -163,76 +175,76 @@ class TradingBot:
                 indicators_data = self.calculate_indicators(df)
                 price = df['close'].iloc[-1]
 
-                # چک کردن پوزیشن باز
-                positions = self.exchange.fetch_positions([self.symbol], params={'category': 'linear'})
-                open_position = None
-                for pos in positions:
-                    if pos['symbol'] == self.symbol and pos['contracts'] > 0:
-                        open_position = pos
-                        break
+                open_position = self.get_open_position()
 
-                # مدیریت پوزیشن باز (بستن با شرط RSI)
-                if open_position and 'RSI' in self.indicators:
+                if open_position and 'RSI' in self.indicators and 'Stochastic' in self.indicators:
                     rsi = indicators_data.get('RSI')
-                    if rsi is not None:
-                        rsi = rsi.iloc[-1]
-                        if (rsi <= 50 and open_position['side'] == 'sell') or (rsi >= 50 and open_position['side'] == 'buy'):
-                            self.close_position(open_position)
-                            sleep(60)
-                            continue
+                    stoch_k = indicators_data.get('Stoch_K')
+                    stoch_d = indicators_data.get('Stoch_D')
+                    if any(x is None for x in [rsi, stoch_k, stoch_d]):
+                        logger.warning("اندیکاتورهای RSI/Stochastic محاسبه نشدند")
+                        sleep(60)
+                        continue
+                    rsi = rsi.iloc[-1]
+                    stoch_k = stoch_k.iloc[-1]
+                    stoch_d = stoch_d.iloc[-1]
+                    logger.info(f"RSI فعلی: {rsi:.2f}, Stochastic K: {stoch_k:.2f}, D: {stoch_d:.2f}")
+                    if ((rsi <= 50 or (stoch_k < 50 and stoch_d < 50)) and open_position['side'] == 'sell') or \
+                       ((rsi >= 50 or (stoch_k > 50 and stoch_d > 50)) and open_position['side'] == 'buy'):
+                        self.close_position(open_position)
+                        sleep(60)
+                        continue
 
-                # فقط اگه پوزیشن باز نداریم، پوزیشن جدید باز می‌کنیم
                 if open_position:
                     logger.info(f"پوزیشن باز وجود دارد: {open_position}. پوزیشن جدید باز نمی‌شود.")
                     sleep(60)
                     continue
 
-                # تولید سیگنال
                 signal = None
                 higher_signal = self.check_higher_timeframe()
 
-                # استراتژی برای تایم‌فریم 5 دقیقه (RSI, Bollinger, Volume)
-                if 'RSI' in self.indicators and 'Bollinger' in self.indicators and 'Volume' in self.indicators:
+                if 'RSI' in self.indicators and 'Stochastic' in self.indicators and 'Volume' in self.indicators:
                     rsi = indicators_data.get('RSI')
-                    bb_upper = indicators_data.get('BB_Upper')
-                    bb_lower = indicators_data.get('BB_Lower')
+                    stoch_k = indicators_data.get('Stoch_K')
+                    stoch_d = indicators_data.get('Stoch_D')
                     volume = indicators_data.get('Volume')
                     volume_ma = indicators_data.get('Volume_MA')
-                    if any(x is None for x in [rsi, bb_upper, bb_lower, volume, volume_ma]):
-                        logger.warning(f"اندیکاتورهای RSI/Bollinger/Volume برای {self.symbol} محاسبه نشدند")
+                    if any(x is None for x in [rsi, stoch_k, stoch_d, volume, volume_ma]):
+                        logger.warning(f"اندیکاتورهای RSI/Stochastic/Volume برای {self.symbol} محاسبه نشدند")
                         sleep(60)
                         continue
                     rsi = rsi.iloc[-1]
-                    bb_upper = bb_upper.iloc[-1]
-                    bb_lower = bb_lower.iloc[-1]
+                    stoch_k = stoch_k.iloc[-1]
+                    stoch_d = stoch_d.iloc[-1]
                     volume = volume.iloc[-1]
                     volume_ma = volume_ma.iloc[-1]
 
-                    if (rsi < 30 and price < bb_lower and volume > volume_ma and
+                    if (rsi < 30 and stoch_k < 20 and stoch_d < 20 and stoch_k > stoch_d and volume > volume_ma and
                         (higher_signal == 'Long' or higher_signal == 'Neutral')):
                         signal = 'Long'
-                    elif (rsi > 70 and price > bb_upper and volume > volume_ma and
+                    elif (rsi > 70 and stoch_k > 80 and stoch_d > 80 and stoch_k < stoch_d and volume > volume_ma and
                           (higher_signal == 'Short' or higher_signal == 'Neutral')):
                         signal = 'Short'
 
-                # استراتژی برای تایم‌فریم 15 دقیقه (MACD, EMA)
-                elif 'MACD' in self.indicators and 'EMA' in self.indicators:
-                    macd = indicators_data.get('MACD')
-                    macd_signal = indicators_data.get('MACD_Signal')
+                elif 'ADX' in self.indicators and 'EMA' in self.indicators:
+                    adx = indicators_data.get('ADX')
+                    plus_di = indicators_data.get('Plus_DI')
+                    minus_di = indicators_data.get('Minus_DI')
                     ema20 = indicators_data.get('EMA20')
                     ema50 = indicators_data.get('EMA50')
-                    if any(x is None for x in [macd, macd_signal, ema20, ema50]):
-                        logger.warning(f"اندیکاتورهای MACD/EMA برای {self.symbol} محاسبه نشدند")
+                    if any(x is None for x in [adx, plus_di, minus_di, ema20, ema50]):
+                        logger.warning(f"اندیکاتورهای ADX/EMA برای {self.symbol} محاسبه نشدند")
                         sleep(60)
                         continue
-                    macd = macd.iloc[-1]
-                    macd_signal = macd_signal.iloc[-1]
+                    adx = adx.iloc[-1]
+                    plus_di = plus_di.iloc[-1]
+                    minus_di = minus_di.iloc[-1]
                     ema20 = ema20.iloc[-1]
                     ema50 = ema50.iloc[-1]
 
-                    if macd > macd_signal and ema20 > ema50:
+                    if adx > 25 and plus_di > minus_di and ema20 > ema50:
                         signal = 'Long'
-                    elif macd < macd_signal and ema20 < ema50:
+                    elif adx > 25 and minus_di > plus_di and ema20 < ema50:
                         signal = 'Short'
 
                 else:
@@ -262,8 +274,22 @@ class TradingBot:
                             order = self.exchange.create_market_buy_order(self.symbol, quantity, params)
                         else:
                             order = self.exchange.create_market_sell_order(self.symbol, quantity, params)
-                        order_details = self.exchange.fetch_order(order['id'], self.symbol, params={'category': 'linear'})
-                        logger.info(f"پوزیشن {signal} باز شد - Quantity: {quantity:.4f}, Order: {order_details}")
+                        sleep(2)
+                        open_orders = self.exchange.fetch_open_orders(self.symbol, params={'category': 'linear'})
+                        order_details = None
+                        for o in open_orders:
+                            if o['id'] == order['id']:
+                                order_details = o
+                                break
+                        if order_details:
+                            logger.info(f"پوزیشن {signal} باز شد - Quantity: {quantity:.4f}, Order: {order_details}")
+                        else:
+                            logger.warning(f"جزئیات سفارش {order['id']} پیدا نشد. سفارش ممکن است بسته شده باشد.")
+                        position = self.get_open_position()
+                        if position:
+                            logger.info(f"پوزیشن فعال: {position}")
+                        else:
+                            logger.warning("پوزیشن باز شده پیدا نشد!")
                     except Exception as e:
                         logger.error(f"خطا در باز کردن پوزیشن: {e}")
 
@@ -296,14 +322,14 @@ if __name__ == "__main__":
     bot1 = manager.add_bot(
         symbol='BTC/USDT:USDT',
         timeframe='5m',
-        indicators=['RSI', 'Bollinger', 'Volume'],
+        indicators=['RSI', 'Stochastic', 'Volume'],
         higher_timeframe='15m'
     )
 
     bot2 = manager.add_bot(
         symbol='BTC/USDT:USDT',
         timeframe='15m',
-        indicators=['MACD', 'EMA']
+        indicators=['ADX', 'EMA']
     )
 
     manager.start_all()
