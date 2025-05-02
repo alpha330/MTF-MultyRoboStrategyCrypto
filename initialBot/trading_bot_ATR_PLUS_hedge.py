@@ -3,35 +3,54 @@ import pandas as pd
 import pandas_ta as ta
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+import os
 
-# تنظیمات لاگ
+# Load environment variables from .env file
+load_dotenv("../.env")
+
+# Configure logging
 logging.basicConfig(
     filename='/root/MTF-MultyRoboStrategyCrypto/initialBot/trading_bot_ATR_PLUS.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
+def get_utc_timestamp():
+    # Get current UTC timestamp in milliseconds
+    utc_now = datetime.now(timezone.utc)
+    return int(utc_now.timestamp() * 1000)
+
 class TradingBot:
-    def __init__(self, api_key, api_secret):
-        # تنظیمات صرافی (Bybit Testnet)
+    def __init__(self):
+        # Fetch API Key and Secret from .env file
+        api_key = os.getenv('BYBIT_TESTNET_API_KEY')
+        api_secret = os.getenv('BYBIT_TESTNET_API_SECRET')
+        print(f"API Key: {api_key}")
+        print(f"API Secret: {api_secret}")
+        if not api_key or not api_secret:
+            raise ValueError("API Key or Secret not found in .env file!")
+
+        # Initialize Bybit Testnet exchange
         self.exchange = ccxt.bybit({
             'apiKey': api_key,
             'secret': api_secret,
             'enableRateLimit': True,
-            'test': True  # برای تست‌نت Bybit
+            'testnet': True  # Enable Testnet mode for Bybit
         })
+        self.exchange.nonce = get_utc_timestamp
         
-        # فعال‌سازی حالت Hedged
+        # Enable Hedged position mode
         self.exchange.set_position_mode(hedged=True)
         
-        # تنظیمات عمومی
+        # General settings
         self.symbol = 'BTC/USDT:USDT'
         self.leverage = 5
-        self.risk_percent = 0.005  # حجم معاملات
-        self.min_position_interval = 15 * 60  # حداقل 15 دقیقه فاصله بین پوزیشن‌ها (به ثانیه)
+        self.risk_percent = 0.005  # Trading volume percentage
+        self.min_position_interval = 15 * 60  # Minimum 15 minutes interval between positions (in seconds)
         
-        # تنظیمات اندیکاتورها
+        # Indicator settings
         self.rsi_long_threshold = 25
         self.rsi_short_threshold = 75
         self.stoch_k_long = 10
@@ -39,17 +58,17 @@ class TradingBot:
         self.stoch_k_short = 90
         self.stoch_d_short = 90
         
-        # تنظیمات مدیریت ریسک
-        self.atr_sl_multiplier = 3  # برای Stop Loss
-        self.atr_tp_multiplier = 5  # برای Take Profit
+        # Risk management settings
+        self.atr_sl_multiplier = 3  # Multiplier for Stop Loss
+        self.atr_tp_multiplier = 5  # Multiplier for Take Profit
         
-        # تنظیمات ایچیموکو
+        # Ichimoku settings
         self.ichimoku_tf = "1h"
         
-        # متغیر برای مدیریت فاصله زمانی
+        # Variable to track last position time
         self.last_position_time = 0
         
-        # تنظیم لِوِرج
+        # Set leverage
         self.set_leverage()
 
     def set_leverage(self):
@@ -76,23 +95,23 @@ class TradingBot:
 
         while True:
             try:
-                # دریافت داده‌ها (تایم‌فریم 5 دقیقه)
+                # Fetch OHLCV data (5-minute timeframe)
                 data_5m = self.exchange.fetch_ohlcv(self.symbol, timeframe="5m", limit=200)
                 df_5m = pd.DataFrame(data_5m, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 self.log(f"FOR OHLCV DATA {self.symbol} IN 5m CANDLES ARE GET: {len(df_5m)}")
 
-                # دریافت داده‌های ایچیموکو (تایم‌فریم 1 ساعته)
+                # Fetch Ichimoku data (1-hour timeframe)
                 data_1h = self.exchange.fetch_ohlcv(self.symbol, timeframe=self.ichimoku_tf, limit=200)
                 df_1h = pd.DataFrame(data_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 self.log(f"FOR OHLCV DATA {self.symbol} IN {self.ichimoku_tf} CANDLES ARE GET: {len(df_1h)}")
 
-                # محاسبه اندیکاتورهای ایچیموکو
+                # Calculate Ichimoku indicators
                 ichimoku = df_1h.ta.ichimoku()
                 price = df_1h["close"].iloc[-1]
                 span_a = ichimoku[0]["ISA_9"].iloc[-1]  # Span A
                 span_b = ichimoku[0]["ISB_26"].iloc[-1]  # Span B
 
-                # محاسبه اندیکاتورها (تایم‌فریم 5 دقیقه)
+                # Calculate indicators (5-minute timeframe)
                 df_5m["rsi"] = ta.rsi(df_5m["close"], length=14)
                 stoch = ta.stoch(df_5m["high"], df_5m["low"], df_5m["close"], k=14, d=3)
                 df_5m["stoch_k"] = stoch["STOCHk_14_3_3"]
@@ -100,13 +119,13 @@ class TradingBot:
                 atr = ta.atr(df_5m["high"], df_5m["low"], df_5m["close"], length=14)
                 current_atr = atr.iloc[-1]
 
-                # اندیکاتورهای فعلی
+                # Current indicator values
                 current_rsi = df_5m["rsi"].iloc[-1]
                 current_stoch_k = df_5m["stoch_k"].iloc[-1]
                 current_stoch_d = df_5m["stoch_d"].iloc[-1]
                 self.log(f"Current RSI: {current_rsi:.2f}, Stochastic K: {current_stoch_k:.2f}, D: {current_stoch_d:.2f}", level="INDICATORS")
 
-                # دریافت موقعیت فعلی
+                # Fetch current positions
                 positions = self.exchange.fetch_positions([self.symbol])
                 long_position = None
                 short_position = None
@@ -116,20 +135,20 @@ class TradingBot:
                     elif pos["side"] == "short":
                         short_position = pos
 
-                # محاسبه فاصله زمانی از آخرین پوزیشن
+                # Calculate time since last position
                 current_time = time.time()
                 time_since_last_position = current_time - self.last_position_time
 
-                # تشخیص روند با ایچیموکو
+                # Determine trend with Ichimoku
                 trend = "neutral"
                 if price > max(span_a, span_b):
-                    trend = "bullish"  # فقط Long
+                    trend = "bullish"  # Only Long
                 elif price < min(span_a, span_b):
-                    trend = "bearish"  # فقط Short
+                    trend = "bearish"  # Only Short
 
-                # منطق سیگنال
-                if time_since_last_position >= self.min_position_interval:  # شرط فاصله زمانی
-                    # سیگنال Long
+                # Signal logic
+                if time_since_last_position >= self.min_position_interval:  # Check time interval
+                    # Long signal
                     if (current_rsi < self.rsi_long_threshold and 
                         current_stoch_k < self.stoch_k_long and 
                         current_stoch_d < self.stoch_d_long and 
@@ -138,7 +157,7 @@ class TradingBot:
                             self.open_position("long", current_atr)
                             self.last_position_time = current_time
 
-                    # سیگنال Short
+                    # Short signal
                     if (current_rsi > self.rsi_short_threshold and 
                         current_stoch_k > self.stoch_k_short and 
                         current_stoch_d > self.stoch_d_short and 
@@ -150,21 +169,21 @@ class TradingBot:
             except Exception as e:
                 self.log(f"Error in run loop: {str(e)}", level="ERROR")
             
-            time.sleep(60)  # هر 60 ثانیه چک کن
+            time.sleep(60)  # Check every 60 seconds
 
     def open_position(self, side, atr):
         try:
-            # محاسبه حجم
+            # Calculate position size
             balance = self.exchange.fetch_balance()["total"]["USDT"]
             risk_amount = balance * self.risk_percent
             price = self.exchange.fetch_ticker(self.symbol)["last"]
             quantity = risk_amount / price
 
-            # محاسبه Stop Loss و Take Profit
+            # Calculate Stop Loss and Take Profit
             sl_price = price + (atr * self.atr_sl_multiplier) if side == "short" else price - (atr * self.atr_sl_multiplier)
             tp_price = price - (atr * self.atr_tp_multiplier) if side == "short" else price + (atr * self.atr_tp_multiplier)
 
-            # باز کردن پوزیشن
+            # Open position
             if side == "long":
                 self.exchange.create_market_buy_order(self.symbol, quantity)
                 self.log(f"Opened Long position at {price} with quantity {quantity}")
@@ -172,7 +191,7 @@ class TradingBot:
                 self.exchange.create_market_sell_order(self.symbol, quantity)
                 self.log(f"Opened Short position at {price} with quantity {quantity}")
 
-            # تنظیم Stop Loss و Take Profit
+            # Set Stop Loss and Take Profit
             self.exchange.create_order(
                 symbol=self.symbol,
                 type="stop",
@@ -194,9 +213,5 @@ class TradingBot:
             self.log(f"Error opening position: {str(e)}", level="ERROR")
 
 if __name__ == "__main__":
-    # وارد کردن API Key و Secret (اینجا باید API خودت رو وارد کنی)
-    api_key = "YOUR_API_KEY"
-    api_secret = "YOUR_API_SECRET"
-
-    bot = TradingBot(api_key, api_secret)
+    bot = TradingBot()
     bot.run()
