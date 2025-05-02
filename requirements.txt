@@ -3,3 +3,4 @@ pandas
 ta
 python-dotenv 
 requests
+pandas_ta
