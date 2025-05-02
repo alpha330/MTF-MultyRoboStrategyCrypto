@@ -25,7 +25,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/root/MTF-MultyRoboStrategyCrypto/initialBot/trading_bot_ATR_PLUS.log'),
+        logging.FileHandler('/root/MTF-MultyRoboStrategyCrypto/initialBot/trading_3bot_ICHI.log'),
         logging.StreamHandler()
     ]
 )
@@ -41,14 +41,16 @@ def get_utc_timestamp():
     return int(utc_now.timestamp() * 1000)
 
 class TradingBot:
-    def __init__(self, symbol, timeframe, indicators, higher_timeframe=None, leverage=5, risk_percent=0.01):
+    def __init__(self, symbol, timeframe, indicators, higher_timeframe=None, higher_bot=None, leverage=5, risk_percent=0.01):
         self.symbol = symbol
         self.timeframe = timeframe
         self.indicators = indicators
         self.higher_timeframe = higher_timeframe
+        self.higher_bot = higher_bot  # Reference to the higher timeframe bot
         self.leverage = leverage
         self.risk_percent = risk_percent
         self.running = False
+        self.last_signal = 'Neutral'  # Store the last signal for higher timeframe bots
         self.exchange = ccxt.bybit({
             'apiKey': API_KEY,
             'secret': API_SECRET,
@@ -85,7 +87,7 @@ class TradingBot:
         for _ in range(3):
             try:
                 ohlcv = self.exchange.fetch_ohlcv(self.symbol, timeframe, limit=200)
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df = pd.DataDF = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 logger.info(f"{bcolors.OKGREEN}FOR OHLCV DATA {self.symbol} IN {timeframe} CANDLES ARE GET: {len(df)}")
                 if len(df) < 50:
@@ -120,28 +122,53 @@ class TradingBot:
                 indicators_data['Volume_MA'] = ta.trend.SMAIndicator(df['volume'], window=20).sma_indicator()
             elif indicator == 'ATR':
                 indicators_data['ATR'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
+            elif indicator == 'Ichimoku':
+                ichimoku = ta.trend.IchimokuIndicator(df['high'], df['low'], window1=9, window2=26, window3=52)
+                indicators_data['Tenkan_sen'] = ichimoku.ichimoku_conversion_line()
+                indicators_data['Kijun_sen'] = ichimoku.ichimoku_base_line()
+                indicators_data['Senkou_Span_A'] = ichimoku.ichimoku_a()
+                indicators_data['Senkou_Span_B'] = ichimoku.ichimoku_b()
+                indicators_data['Chikou_Span'] = df['close'].shift(-26)  # Chikou Span is the closing price shifted back
         return indicators_data
 
     def check_higher_timeframe(self):
+        # If this bot is linked to a higher timeframe bot (e.g., bot3 for bot2)
+        if self.higher_bot:
+            higher_signal = self.higher_bot.last_signal
+            logger.info(f"{bcolors.OKCYAN}Using signal from higher bot ({self.higher_bot.timeframe}): {higher_signal}")
+
+            # If the higher bot signals a strong trend, follow it
+            if higher_signal == 'Long':
+                return 'Long'
+            elif higher_signal == 'Short':
+                return 'Short'
+
+        # Otherwise, fall back to the local higher timeframe logic (e.g., bot2's logic for bot1)
         if not self.higher_timeframe:
             return 'Neutral'
+
         df_higher = self.fetch_ohlcv(self.higher_timeframe)
         if df_higher is None or df_higher.empty:
             return 'Neutral'
+
         indicators_higher = self.calculate_indicators(df_higher)
         ema20 = indicators_higher.get('EMA20')
         ema50 = indicators_higher.get('EMA50')
         adx = indicators_higher.get('ADX')
         plus_di = indicators_higher.get('Plus_DI')
         minus_di = indicators_higher.get('Minus_DI')
+
         if any(x is None for x in [ema20, ema50, adx, plus_di, minus_di]):
             return 'Neutral'
+
         ema20 = ema20.iloc[-1]
         ema50 = ema50.iloc[-1]
         adx = adx.iloc[-1]
         plus_di = plus_di.iloc[-1]
         minus_di = minus_di.iloc[-1]
+
         logger.info(f"{bcolors.OKCYAN}Higher Timeframe Indicators - ADX: {adx:.2f}, +DI: {plus_di:.2f}, -DI: {minus_di:.2f}, EMA20: {ema20:.2f}, EMA50: {ema50:.2f}")
+
         if adx > 20 and ema20 > ema50 and plus_di > minus_di:
             return 'Long'
         elif adx > 20 and ema20 < ema50 and minus_di > plus_di:
@@ -190,6 +217,58 @@ class TradingBot:
                 indicators_data = self.calculate_indicators(df)
                 price = df['close'].iloc[-1]
 
+                # For bots that only analyze trends (bot2, bot3), update the last signal
+                if 'Ichimoku' in self.indicators:
+                    tenkan_sen = indicators_data.get('Tenkan_sen')
+                    kijun_sen = indicators_data.get('Kijun_sen')
+                    senkou_span_a = indicators_data.get('Senkou_Span_A')
+                    senkou_span_b = indicators_data.get('Senkou_Span_B')
+                    chikou_span = indicators_data.get('Chikou_Span')
+
+                    if any(x is None for x in [tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span]):
+                        logger.warning(f"{bcolors.WARNING}Ichimoku Indicators for {self.symbol} Not Calculated")
+                        self.last_signal = 'Neutral'
+                        sleep(60)
+                        continue
+
+                    tenkan_sen = tenkan_sen.iloc[-1]
+                    kijun_sen = kijun_sen.iloc[-1]
+                    senkou_span_a = senkou_span_a.iloc[-1]
+                    senkou_span_b = senkou_span_b.iloc[-1]
+                    chikou_span = chikou_span.iloc[-1]
+                    close = df['close'].iloc[-1]
+                    close_26_ago = df['close'].iloc[-27] if len(df) > 27 else close
+
+                    logger.info(f"{bcolors.OKCYAN}Ichimoku Indicators - Tenkan-sen: {tenkan_sen:.2f}, Kijun-sen: {kijun_sen:.2f}, Senkou Span A: {senkou_span_a:.2f}, Senkou Span B: {senkou_span_b:.2f}, Chikou Span: {chikou_span:.2f}")
+
+                    # Bullish trend
+                    if (close > senkou_span_a and close > senkou_span_b and
+                        tenkan_sen > kijun_sen and
+                        chikou_span > close_26_ago and
+                        senkou_span_a > senkou_span_b):
+                        self.last_signal = 'Long'
+                    # Bearish trend
+                    elif (close < senkou_span_a and close < senkou_span_b and
+                          tenkan_sen < kijun_sen and
+                          chikou_span < close_26_ago and
+                          senkou_span_a < senkou_span_b):
+                        self.last_signal = 'Short'
+                    else:
+                        self.last_signal = 'Neutral'
+
+                    logger.info(f"{bcolors.OKCYAN}Ichimoku Signal for {self.timeframe}: {self.last_signal}")
+                    sleep(60)
+                    continue
+
+                # For bot2 (15m), just update the signal
+                if 'ADX' in self.indicators and 'EMA' in self.indicators and not ('RSI' in self.indicators):
+                    higher_signal = self.check_higher_timeframe()
+                    self.last_signal = higher_signal
+                    logger.info(f"{bcolors.OKCYAN}Bot {self.timeframe} Signal: {self.last_signal}")
+                    sleep(60)
+                    continue
+
+                # For bot1 (5m), proceed with trading logic
                 open_position = self.get_open_position()
 
                 if open_position and 'RSI' in self.indicators and 'Stochastic' in self.indicators:
@@ -241,32 +320,6 @@ class TradingBot:
                     elif (rsi > 60 and stoch_k > 70 and stoch_d > 70 and stoch_k < stoch_d and volume > volume_ma and
                           (higher_signal == 'Short' or higher_signal == 'Neutral')):
                         signal = 'Short'
-
-                elif 'ADX' in self.indicators and 'EMA' in self.indicators:
-                    adx = indicators_data.get('ADX')
-                    plus_di = indicators_data.get('Plus_DI')
-                    minus_di = indicators_data.get('Minus_DI')
-                    ema20 = indicators_data.get('EMA20')
-                    ema50 = indicators_data.get('EMA50')
-                    if any(x is None for x in [adx, plus_di, minus_di, ema20, ema50]):
-                        logger.warning(f"{bcolors.WARNING}Indicators ADX/EMA for {self.symbol} Not Calculated")
-                        sleep(60)
-                        continue
-                    adx = adx.iloc[-1]
-                    plus_di = plus_di.iloc[-1]
-                    minus_di = minus_di.iloc[-1]
-                    ema20 = ema20.iloc[-1]
-                    ema50 = ema50.iloc[-1]
-
-                    if adx > 20 and plus_di > minus_di and ema20 > ema50:
-                        signal = 'Long'
-                    elif adx > 20 and minus_di > plus_di and ema20 < ema50:
-                        signal = 'Short'
-
-                else:
-                    logger.warning(f"{bcolors.WARNING}Assigned Indicators For {self.symbol} Not Supported")
-                    sleep(60)
-                    continue
 
                 if signal:
                     balance = self.exchange.fetch_balance(params={'recv_window': 60000, 'type': 'linear'})['USDT']['free']
@@ -329,8 +382,8 @@ class BotManager:
     def __init__(self):
         self.bots = []
 
-    def add_bot(self, symbol, timeframe, indicators, higher_timeframe=None):
-        bot = TradingBot(symbol, timeframe, indicators, higher_timeframe)
+    def add_bot(self, symbol, timeframe, indicators, higher_timeframe=None, higher_bot=None):
+        bot = TradingBot(symbol, timeframe, indicators, higher_timeframe, higher_bot)
         self.bots.append(bot)
         return bot
 
@@ -341,17 +394,27 @@ class BotManager:
 if __name__ == "__main__":
     manager = BotManager()
 
+    # Bot3: 1-hour timeframe with Ichimoku for trend detection
+    bot3 = manager.add_bot(
+        symbol='BTC/USDT:USDT',
+        timeframe='1h',
+        indicators=['Ichimoku']
+    )
+
+    # Bot2: 15-minute timeframe with ADX and EMA, using bot3 for higher trend
+    bot2 = manager.add_bot(
+        symbol='BTC/USDT:USDT',
+        timeframe='15m',
+        indicators=['ADX', 'EMA'],
+        higher_bot=bot3
+    )
+
+    # Bot1: 5-minute timeframe for trading, using bot2 for trend filtering
     bot1 = manager.add_bot(
         symbol='BTC/USDT:USDT',
         timeframe='5m',
         indicators=['RSI', 'Stochastic', 'Volume', 'ATR'],
         higher_timeframe='15m'
-    )
-
-    bot2 = manager.add_bot(
-        symbol='BTC/USDT:USDT',
-        timeframe='15m',
-        indicators=['ADX', 'EMA']
     )
 
     manager.start_all()
