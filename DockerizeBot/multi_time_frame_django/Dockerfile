@@ -1,19 +1,17 @@
-# Base image
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
-# Set work directory
 WORKDIR /app
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+COPY ../requirements.txt /app/
+COPY ./docker-entrypoint.sh /app/docker-entrypoint.sh
 
-# Copy project files
-COPY . .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Collect static files (optional if using admin or static)
-# RUN python manage.py collectstatic --noinput
+COPY . /app/
+
+RUN chmod +x /app/docker-entrypoint.sh
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+

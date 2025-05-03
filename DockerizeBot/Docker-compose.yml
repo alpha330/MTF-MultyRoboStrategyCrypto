@@ -22,53 +22,62 @@ services:
 
   django:
     build:
-      context: .
-      dockerfile: multi_time_frame_django/Dockerfile
+      context: ./multi_time_frame_django
+      dockerfile: Dockerfile
     container_name: django
-    command: >
-      sh -c "python manage.py migrate &&
-             python manage.py runserver 0.0.0.0:8000"
+    # command: python manage.py runserver 0.0.0.0:8000
     volumes:
-      - .:/app
+      - ./multi_time_frame_django:/app
+    working_dir: /app
     ports:
       - "8000:8000"
-    env_file: .env
+    env_file:
+      - .env
     depends_on:
       - db
       - redis
 
-  worker_bot_1h:
+  bot_1h:
     build:
-      context: .
-      dockerfile: worker/Dockerfile
+      context: ./worker
+      dockerfile: Dockerfile
     container_name: bot_1h
-    env_file: .env
+    volumes:
+      - ./worker:/app
+      - ./shared:/app/shared
     depends_on:
       - django
-      - redis
-    command: python worker/bot_1h.py
+    # command: python bot_1h.py
+    env_file:
+      - .env
 
-  worker_bot_15m:
+  bot_15m:
     build:
-      context: .
-      dockerfile: worker/Dockerfile
+      context: ./worker
+      dockerfile: Dockerfile
     container_name: bot_15m
-    env_file: .env
+    volumes:
+      - ./worker:/app
+      - ./shared:/app/shared
     depends_on:
       - django
-      - redis
-    command: python worker/bot_15m.py
+    # command: python bot_15m.py
+    env_file:
+      - .env
 
-  worker_bot_5m:
+  bot_5m:
     build:
-      context: .
-      dockerfile: worker/Dockerfile
+      context: ./worker
+      dockerfile: Dockerfile
     container_name: bot_5m
-    env_file: .env
+    volumes:
+      - ./worker:/app
+      - ./shared:/app/shared
     depends_on:
       - django
-      - redis
-    command: python worker/bot_5m.py
+    # command: python bot_5m.py
+    env_file:
+      - .env
 
 volumes:
   postgres_data:

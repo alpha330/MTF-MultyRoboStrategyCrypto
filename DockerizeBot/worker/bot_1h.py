@@ -27,3 +27,6 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+while True:
+    time.sleep(10)

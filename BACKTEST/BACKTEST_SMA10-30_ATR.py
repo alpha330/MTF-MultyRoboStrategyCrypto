@@ -15,7 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class BacktestBot:
-    def __init__(self, initial_balance=500, leverage=5, risk_percent=0.2, fee_rate=0.0006):
+    def __init__(self, initial_balance=500, leverage=3, risk_percent=0.2, fee_rate=0.0006):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.leverage = leverage
@@ -24,6 +24,9 @@ class BacktestBot:
         self.btc_held = 0
         self.trades = []
         self.position = None
+        self.trailing_stop = 0.0
+        self.highest_price = 0.0
+        self.lowest_price = float('inf')
 
         # لود داده‌ها
         self.df_5m = pd.read_csv('../BTCUSDT_5m_historical.csv')
@@ -184,22 +187,20 @@ class BacktestBot:
             rsi_5m = indicators_5m['RSI'].iloc[-1]
             macd_5m = indicators_5m['MACD'].iloc[-1]
             macd_signal_5m = indicators_5m['MACD_Signal'].iloc[-1]
-            macd_diff_5m = indicators_5m['MACD_Diff'].iloc[-1]
-            macd_diff_prev_5m = indicators_5m['MACD_Diff'].iloc[-2] if len(indicators_5m['MACD_Diff']) > 1 else float('nan')
 
             higher_tf_signal = self.check_higher_timeframe(timestamp)
 
             signal = 'Neutral'
             if (not pd.isna(sma20_5m) and not pd.isna(sma50_5m) and not pd.isna(sma20_prev_5m) and 
                 not pd.isna(sma50_prev_5m) and not pd.isna(adx_5m) and not pd.isna(volume_ma20_5m) and
-                not pd.isna(macd_5m) and not pd.isna(macd_signal_5m) and not pd.isna(macd_diff_5m) and not pd.isna(macd_diff_prev_5m)):
+                not pd.isna(macd_5m) and not pd.isna(macd_signal_5m)):
                 if (sma20_prev_5m <= sma50_prev_5m and sma20_5m > sma50_5m and 
                     adx_5m > 25 and current_volume > volume_ma20_5m and higher_tf_signal == 'Long' and
-                    macd_diff_prev_5m <= 0 and macd_diff_5m > 0):  # MACD کراس صعودی
+                    macd_5m > macd_signal_5m):
                     signal = 'Long'
                 elif (sma20_prev_5m >= sma50_prev_5m and sma20_5m < sma50_5m and 
                       adx_5m > 25 and current_volume > volume_ma20_5m and higher_tf_signal == 'Short' and
-                      macd_diff_prev_5m >= 0 and macd_diff_5m < 0):  # MACD کراس نزولی
+                      macd_5m < macd_signal_5m):
                     signal = 'Short'
 
             if position is None and signal != 'Neutral':
@@ -209,9 +210,20 @@ class BacktestBot:
                 position = signal
                 stop_loss = entry_price - (5 * atr_5m) if signal == 'Long' else entry_price + (5 * atr_5m)
                 take_profit = entry_price + (6 * atr_5m) if signal == 'Long' else entry_price - (6 * atr_5m)
+                self.highest_price = entry_price if signal == 'Long' else float('inf')
+                self.lowest_price = entry_price if signal == 'Short' else 0
+                self.trailing_stop = stop_loss
                 trades += 1
                 logger.info(f"Opened {position} at {entry_price}, Quantity: {quantity:.4f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Balance: {self.balance:.2f}")
             elif position is not None:
+                # به‌روزرسانی Trailing Stop
+                if position == 'Long':
+                    self.highest_price = max(self.highest_price, current_price)
+                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (5 * atr_5m))
+                elif position == 'Short':
+                    self.lowest_price = min(self.lowest_price, current_price)
+                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (5 * atr_5m))
+
                 exit_position = False
                 if position == 'Long' and not pd.isna(rsi_5m) and rsi_5m > 75:
                     exit_position = True
@@ -221,14 +233,16 @@ class BacktestBot:
                     logger.info(f"Closing Short due to RSI oversold: {rsi_5m}")
 
                 if position == 'Long':
-                    if exit_position or current_price <= stop_loss or current_price >= take_profit or signal == 'Short':
+                    if (exit_position or current_price <= self.trailing_stop or 
+                        current_price >= take_profit or signal == 'Short'):
                         profit = (current_price - entry_price) * quantity * self.leverage - (self.fee_rate * position_size)
                         self.balance += profit
                         logger.info(f"Closed Long at {current_price}, Profit: {profit:.2f}, Fee: {self.fee_rate*position_size:.4f}, Balance: {self.balance:.2f}")
                         position = None
                         trades += 1
                 elif position == 'Short':
-                    if exit_position or current_price >= stop_loss or current_price <= take_profit or signal == 'Long':
+                    if (exit_position or current_price >= self.trailing_stop or 
+                        current_price <= take_profit or signal == 'Long'):
                         profit = (entry_price - current_price) * quantity * self.leverage - (self.fee_rate * position_size)
                         self.balance += profit
                         logger.info(f"Closed Short at {current_price}, Profit: {profit:.2f}, Fee: {self.fee_rate*position_size:.4f}, Balance: {self.balance:.2f}")
@@ -245,5 +259,5 @@ class BacktestBot:
         logger.info(f"Number of Trades: {trades}")
 
 if __name__ == "__main__":
-    backtest = BacktestBot(initial_balance=500, leverage=5)
+    backtest = BacktestBot(initial_balance=500, leverage=3)
     backtest.run_backtest()
