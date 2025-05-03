@@ -15,7 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class BacktestBot:
-    def __init__(self, initial_balance=500, leverage=25, risk_percent=0.2, fee_rate=0.0006):
+    def __init__(self, initial_balance=500, leverage=5, risk_percent=0.2, fee_rate=0.0006):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.leverage = leverage
@@ -26,9 +26,9 @@ class BacktestBot:
         self.position = None
 
         # لود داده‌ها
-        self.df_5m = pd.read_csv('BTCUSDT_5m_historical.csv')
-        self.df_15m = pd.read_csv('BTCUSDT_15m_historical.csv')
-        self.df_1h = pd.read_csv('BTCUSDT_1h_historical.csv')
+        self.df_5m = pd.read_csv('../BTCUSDT_5m_historical.csv')
+        self.df_15m = pd.read_csv('../BTCUSDT_15m_historical.csv')
+        self.df_1h = pd.read_csv('../BTCUSDT_1h_historical.csv')
 
         # محاسبه HODL
         self.hodl_btc = initial_balance / self.df_5m['close'].iloc[0]
@@ -96,18 +96,26 @@ class BacktestBot:
         else:
             indicators_data['RSI'] = pd.Series([float('nan')] * len(df))
 
+        # MACD
+        if len(df) >= 26:
+            macd = ta.trend.MACD(df['close'], window_slow=26, window_fast=12, window_sign=9)
+            indicators_data['MACD'] = macd.macd()
+            indicators_data['MACD_Signal'] = macd.macd_signal()
+            indicators_data['MACD_Diff'] = macd.macd_diff()
+        else:
+            indicators_data['MACD'] = pd.Series([float('nan')] * len(df))
+            indicators_data['MACD_Signal'] = pd.Series([float('nan')] * len(df))
+            indicators_data['MACD_Diff'] = pd.Series([float('nan')] * len(df))
+
         return indicators_data
 
     def check_higher_timeframe(self, timestamp):
-        # فیلتر داده‌های 15m و 1h بر اساس زمان فعلی
         df_15m = self.df_15m[self.df_15m['timestamp'] <= timestamp].tail(200)
         df_1h = self.df_1h[self.df_1h['timestamp'] <= timestamp].tail(200)
 
-        # اگه دیتا خالی بود یا تعداد ردیف‌ها کافی نبود، سیگنال پیش‌فرض برگردون
         if len(df_1h) < 52 or len(df_15m) < 200:
             return 'Neutral'
 
-        # Bot3 (1h) - Ichimoku
         indicators_1h = self.calculate_indicators(df_1h, timeframe='1h')
         tenkan_sen = indicators_1h['Tenkan_sen'].iloc[-1]
         kijun_sen = indicators_1h['Kijun_sen'].iloc[-1]
@@ -130,7 +138,6 @@ class BacktestBot:
                   senkou_span_a < senkou_span_b):
                 signal_1h = 'Short'
 
-        # Bot2 (15m) - ADX و EMA
         indicators_15m = self.calculate_indicators(df_15m, timeframe='15m')
         ema50 = indicators_15m['EMA50'].iloc[-1]
         ema200 = indicators_15m['EMA200'].iloc[-1]
@@ -162,7 +169,6 @@ class BacktestBot:
             current_price = row['close']
             current_volume = row['volume']
 
-            # محاسبه اندیکاتورها برای تایم‌فریم ۵ دقیقه
             df_5m = self.df_5m[self.df_5m['timestamp'] <= timestamp].tail(200)
             if len(df_5m) < 50:
                 continue
@@ -176,24 +182,27 @@ class BacktestBot:
             adx_5m = indicators_5m['ADX'].iloc[-1]
             volume_ma20_5m = indicators_5m['Volume_MA20'].iloc[-1]
             rsi_5m = indicators_5m['RSI'].iloc[-1]
+            macd_5m = indicators_5m['MACD'].iloc[-1]
+            macd_signal_5m = indicators_5m['MACD_Signal'].iloc[-1]
+            macd_diff_5m = indicators_5m['MACD_Diff'].iloc[-1]
+            macd_diff_prev_5m = indicators_5m['MACD_Diff'].iloc[-2] if len(indicators_5m['MACD_Diff']) > 1 else float('nan')
 
-            # دریافت سیگنال از تایم‌فریم بالاتر
             higher_tf_signal = self.check_higher_timeframe(timestamp)
 
-            # تشخیص سیگنال در تایم‌فریم ۵ دقیقه با فیلتر تایم‌فریم بالاتر
             signal = 'Neutral'
             if (not pd.isna(sma20_5m) and not pd.isna(sma50_5m) and not pd.isna(sma20_prev_5m) and 
-                not pd.isna(sma50_prev_5m) and not pd.isna(adx_5m) and not pd.isna(volume_ma20_5m)):
+                not pd.isna(sma50_prev_5m) and not pd.isna(adx_5m) and not pd.isna(volume_ma20_5m) and
+                not pd.isna(macd_5m) and not pd.isna(macd_signal_5m) and not pd.isna(macd_diff_5m) and not pd.isna(macd_diff_prev_5m)):
                 if (sma20_prev_5m <= sma50_prev_5m and sma20_5m > sma50_5m and 
-                    adx_5m > 25 and current_volume > volume_ma20_5m and higher_tf_signal == 'Long'):
+                    adx_5m > 25 and current_volume > volume_ma20_5m and higher_tf_signal == 'Long' and
+                    macd_diff_prev_5m <= 0 and macd_diff_5m > 0):  # MACD کراس صعودی
                     signal = 'Long'
                 elif (sma20_prev_5m >= sma50_prev_5m and sma20_5m < sma50_5m and 
-                      adx_5m > 25 and current_volume > volume_ma20_5m and higher_tf_signal == 'Short'):
+                      adx_5m > 25 and current_volume > volume_ma20_5m and higher_tf_signal == 'Short' and
+                      macd_diff_prev_5m >= 0 and macd_diff_5m < 0):  # MACD کراس نزولی
                     signal = 'Short'
 
-            # مدیریت پوزیشن
             if position is None and signal != 'Neutral':
-                # اندازه پوزیشن با اهرم
                 position_size = (self.balance * self.risk_percent) * self.leverage
                 quantity = position_size / current_price
                 entry_price = current_price
@@ -203,16 +212,14 @@ class BacktestBot:
                 trades += 1
                 logger.info(f"Opened {position} at {entry_price}, Quantity: {quantity:.4f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Balance: {self.balance:.2f}")
             elif position is not None:
-                # شرط خروج بر اساس RSI (بهینه‌شده)
                 exit_position = False
-                if position == 'Long' and not pd.isna(rsi_5m) and rsi_5m > 75:  # افزایش آستانه به 75
+                if position == 'Long' and not pd.isna(rsi_5m) and rsi_5m > 75:
                     exit_position = True
                     logger.info(f"Closing Long due to RSI overbought: {rsi_5m}")
-                elif position == 'Short' and not pd.isna(rsi_5m) and rsi_5m < 25:  # کاهش آستانه به 25
+                elif position == 'Short' and not pd.isna(rsi_5m) and rsi_5m < 25:
                     exit_position = True
                     logger.info(f"Closing Short due to RSI oversold: {rsi_5m}")
 
-                # چک حد ضرر، حد سود و سیگنال معکوس
                 if position == 'Long':
                     if exit_position or current_price <= stop_loss or current_price >= take_profit or signal == 'Short':
                         profit = (current_price - entry_price) * quantity * self.leverage - (self.fee_rate * position_size)
@@ -228,7 +235,6 @@ class BacktestBot:
                         position = None
                         trades += 1
 
-        # محاسبه HODL
         initial_price = self.df_5m['close'].iloc[0]
         final_price = self.df_5m['close'].iloc[-1]
         hodl_value = (self.initial_balance / initial_price) * final_price

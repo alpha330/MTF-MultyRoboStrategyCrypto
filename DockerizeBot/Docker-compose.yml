@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:13
+    container_name: postgres
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+
+  django:
+    build:
+      context: .
+      dockerfile: multi_time_frame_django/Dockerfile
+    container_name: django
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+
+  worker_bot_1h:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: bot_1h
+    env_file: .env
+    depends_on:
+      - django
+      - redis
+    command: python worker/bot_1h.py
+
+  worker_bot_15m:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: bot_15m
+    env_file: .env
+    depends_on:
+      - django
+      - redis
+    command: python worker/bot_15m.py
+
+  worker_bot_5m:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: bot_5m
+    env_file: .env
+    depends_on:
+      - django
+      - redis
+    command: python worker/bot_5m.py
+
+volumes:
+  postgres_data:
