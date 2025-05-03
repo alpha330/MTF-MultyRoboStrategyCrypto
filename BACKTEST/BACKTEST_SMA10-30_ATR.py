@@ -208,7 +208,7 @@ class BacktestBot:
                 quantity = position_size / current_price
                 entry_price = current_price
                 position = signal
-                stop_loss = entry_price - (5 * atr_5m) if signal == 'Long' else entry_price + (5 * atr_5m)
+                stop_loss = entry_price - (7 * atr_5m) if signal == 'Long' else entry_price + (7 * atr_5m)
                 take_profit = entry_price + (6 * atr_5m) if signal == 'Long' else entry_price - (6 * atr_5m)
                 self.highest_price = entry_price if signal == 'Long' else float('inf')
                 self.lowest_price = entry_price if signal == 'Short' else 0
@@ -219,16 +219,16 @@ class BacktestBot:
                 # به‌روزرسانی Trailing Stop
                 if position == 'Long':
                     self.highest_price = max(self.highest_price, current_price)
-                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (5 * atr_5m))
+                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (7 * atr_5m))
                 elif position == 'Short':
                     self.lowest_price = min(self.lowest_price, current_price)
-                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (5 * atr_5m))
+                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (7 * atr_5m))
 
                 exit_position = False
-                if position == 'Long' and not pd.isna(rsi_5m) and rsi_5m > 75:
+                if position == 'Long' and not pd.isna(rsi_5m) and rsi_5m > 80:
                     exit_position = True
                     logger.info(f"Closing Long due to RSI overbought: {rsi_5m}")
-                elif position == 'Short' and not pd.isna(rsi_5m) and rsi_5m < 25:
+                elif position == 'Short' and not pd.isna(rsi_5m) and rsi_5m < 20:
                     exit_position = True
                     logger.info(f"Closing Short due to RSI oversold: {rsi_5m}")
 
