@@ -7,7 +7,7 @@ from time import sleep
 exchange = ccxt.bybit({'enableRateLimit': True})
 
 # تایم‌فریم‌ها و مدت زمان
-timeframes = {'5m': '5m', '15m': '15m', '1h': '1h'}
+timeframes = {"1m":"1m",'5m': '5m', '15m': '15m', '1h': '1h'}
 symbol = 'BTC/USDT:USDT'
 days = 180  # ۶ ماه (۱۸۰ روز)
 
@@ -26,7 +26,9 @@ def fetch_and_save_historical_data():
         max_retries = 3  # تعداد تلاش‌ها در صورت خطا
 
         # محاسبه تعداد کندل‌های مورد انتظار
-        if tf_name == '5m':
+        if tf_name == '1m':
+            expected_candles = 180 * 24 * 60 // 1  # 259,000 کندل
+        elif tf_name == '5m':
             expected_candles = 180 * 24 * 60 // 5  # ۵۱,۸۴۰ کندل
         elif tf_name == '15m':
             expected_candles = 180 * 24 * 60 // 15  # ۱۷,۲۸۰ کندل

@@ -1,6 +1,8 @@
-Django>=4.2
+Django>=5.1,<6.0
 djangorestframework
-psycopg2-binary
+celery
 redis
-requests
-python-dotenv
+psycopg2-binary
+python-decouple
+django-cors-headers
+django-celery-beat

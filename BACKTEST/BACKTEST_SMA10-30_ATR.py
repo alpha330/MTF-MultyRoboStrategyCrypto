@@ -8,7 +8,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backtest_log_SMA_ADX_Ichimoku_1H.log'),
+        logging.FileHandler('backtest_log_SMA_ADX_Ichimoku_1m.log'),
         logging.StreamHandler()
     ]
 )
@@ -28,24 +28,24 @@ class BacktestBot:
         self.highest_price = 0.0
         self.lowest_price = float('inf')
 
-        # لود داده‌ها
-        self.df_5m = pd.read_csv('./BTCUSDT_5m_historical.csv')
+        # لود داده‌ها (تایم‌فریم ۱ دقیقه)
+        self.df_1m = pd.read_csv('./BTCUSDT_1m_historical.csv')
         self.df_15m = pd.read_csv('./BTCUSDT_15m_historical.csv')
         self.df_1h = pd.read_csv('./BTCUSDT_1h_historical.csv')
 
         # محاسبه HODL
-        self.hodl_btc = initial_balance / self.df_5m['close'].iloc[0]
+        self.hodl_btc = initial_balance / self.df_1m['close'].iloc[0]
         self.hodl_value = 0
 
-    def calculate_indicators(self, df, timeframe='5m'):
+    def calculate_indicators(self, df, timeframe='1m'):
         indicators_data = {}
-        # SMA 20 و SMA 50
-        if len(df) >= 50:
-            indicators_data['SMA20'] = ta.trend.SMAIndicator(df['close'], window=20).sma_indicator()
-            indicators_data['SMA50'] = ta.trend.SMAIndicator(df['close'], window=50).sma_indicator()
+        # SMA 10 و SMA 30
+        if len(df) >= 30:
+            indicators_data['SMA10'] = ta.trend.SMAIndicator(df['close'], window=10).sma_indicator()
+            indicators_data['SMA30'] = ta.trend.SMAIndicator(df['close'], window=30).sma_indicator()
         else:
-            indicators_data['SMA20'] = pd.Series([float('nan')] * len(df))
-            indicators_data['SMA50'] = pd.Series([float('nan')] * len(df))
+            indicators_data['SMA10'] = pd.Series([float('nan')] * len(df))
+            indicators_data['SMA30'] = pd.Series([float('nan')] * len(df))
 
         # EMA 50 و EMA 200
         if len(df) >= 200:
@@ -87,33 +87,17 @@ class BacktestBot:
             indicators_data['Senkou_Span_B'] = pd.Series([float('nan')] * len(df))
             indicators_data['Chikou_Span'] = pd.Series([float('nan')] * len(df))
 
-        # میانگین حجم 20 کندل و 50 کندل
+        # میانگین حجم 20 کندل
         if len(df) >= 20:
             indicators_data['Volume_MA20'] = df['volume'].rolling(window=20).mean()
         else:
             indicators_data['Volume_MA20'] = pd.Series([float('nan')] * len(df))
-
-        if len(df) >= 50:
-            indicators_data['Volume_MA50'] = df['volume'].rolling(window=50).mean()
-        else:
-            indicators_data['Volume_MA50'] = pd.Series([float('nan')] * len(df))
 
         # RSI
         if len(df) >= 14:
             indicators_data['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
         else:
             indicators_data['RSI'] = pd.Series([float('nan')] * len(df))
-
-        # MACD
-        if len(df) >= 26:
-            macd = ta.trend.MACD(df['close'], window_slow=26, window_fast=12, window_sign=9)
-            indicators_data['MACD'] = macd.macd()
-            indicators_data['MACD_Signal'] = macd.macd_signal()
-            indicators_data['MACD_Diff'] = macd.macd_diff()
-        else:
-            indicators_data['MACD'] = pd.Series([float('nan')] * len(df))
-            indicators_data['MACD_Signal'] = pd.Series([float('nan')] * len(df))
-            indicators_data['MACD_Diff'] = pd.Series([float('nan')] * len(df))
 
         return indicators_data
 
@@ -172,41 +156,34 @@ class BacktestBot:
         stop_loss = 0.0
         take_profit = 0.0
 
-        for index, row in self.df_5m.iterrows():
+        for index, row in self.df_1m.iterrows():
             timestamp = row['timestamp']
             current_price = row['close']
             current_volume = row['volume']
 
-            df_5m = self.df_5m[self.df_5m['timestamp'] <= timestamp].tail(200)
-            if len(df_5m) < 50:
+            df_1m = self.df_1m[self.df_1m['timestamp'] <= timestamp].tail(200)
+            if len(df_1m) < 30:
                 continue
 
-            indicators_5m = self.calculate_indicators(df_5m, timeframe='5m')
-            sma20_5m = indicators_5m['SMA20'].iloc[-1]
-            sma50_5m = indicators_5m['SMA50'].iloc[-1]
-            sma20_prev_5m = indicators_5m['SMA20'].iloc[-2] if len(indicators_5m['SMA20']) > 1 else float('nan')
-            sma50_prev_5m = indicators_5m['SMA50'].iloc[-2] if len(indicators_5m['SMA50']) > 1 else float('nan')
-            atr_5m = indicators_5m['ATR'].iloc[-1]
-            adx_5m = indicators_5m['ADX'].iloc[-1]
-            volume_ma20_5m = indicators_5m['Volume_MA20'].iloc[-1]
-            volume_ma50_5m = indicators_5m['Volume_MA50'].iloc[-1]
-            rsi_5m = indicators_5m['RSI'].iloc[-1]
-            macd_5m = indicators_5m['MACD'].iloc[-1]
-            macd_signal_5m = indicators_5m['MACD_Signal'].iloc[-1]
+            indicators_1m = self.calculate_indicators(df_1m, timeframe='1m')
+            sma10_1m = indicators_1m['SMA10'].iloc[-1]
+            sma30_1m = indicators_1m['SMA30'].iloc[-1]
+            sma10_prev_1m = indicators_1m['SMA10'].iloc[-2] if len(indicators_1m['SMA10']) > 1 else float('nan')
+            sma30_prev_1m = indicators_1m['SMA30'].iloc[-2] if len(indicators_1m['SMA30']) > 1 else float('nan')
+            atr_1m = indicators_1m['ATR'].iloc[-1]
+            adx_1m = indicators_1m['ADX'].iloc[-1]
+            rsi_1m = indicators_1m['RSI'].iloc[-1]
 
             higher_tf_signal = self.check_higher_timeframe(timestamp)
 
             signal = 'Neutral'
-            if (not pd.isna(sma20_5m) and not pd.isna(sma50_5m) and not pd.isna(sma20_prev_5m) and 
-                not pd.isna(sma50_prev_5m) and not pd.isna(adx_5m) and not pd.isna(volume_ma20_5m) and
-                not pd.isna(volume_ma50_5m) and not pd.isna(macd_5m) and not pd.isna(macd_signal_5m)):
-                if (sma20_prev_5m <= sma50_prev_5m and sma20_5m > sma50_5m and 
-                    adx_5m > 25 and current_volume > volume_ma20_5m and current_volume > volume_ma50_5m and
-                    higher_tf_signal == 'Long' and macd_5m > macd_signal_5m):
+            if (not pd.isna(sma10_1m) and not pd.isna(sma30_1m) and not pd.isna(sma10_prev_1m) and 
+                not pd.isna(sma30_prev_1m) and not pd.isna(adx_1m)):
+                if (sma10_prev_1m <= sma30_prev_1m and sma10_1m > sma30_1m and 
+                    adx_1m > 15 and higher_tf_signal == 'Long'):
                     signal = 'Long'
-                elif (sma20_prev_5m >= sma50_prev_5m and sma20_5m < sma50_5m and 
-                      adx_5m > 25 and current_volume > volume_ma20_5m and current_volume > volume_ma50_5m and
-                      higher_tf_signal == 'Short' and macd_5m < macd_signal_5m):
+                elif (sma10_prev_1m >= sma30_prev_1m and sma10_1m < sma30_1m and 
+                      adx_1m > 15 and higher_tf_signal == 'Short'):
                     signal = 'Short'
 
             if position is None and signal != 'Neutral':
@@ -214,8 +191,8 @@ class BacktestBot:
                 quantity = position_size / current_price
                 entry_price = current_price
                 position = signal
-                stop_loss = entry_price - (5 * atr_5m) if signal == 'Long' else entry_price + (5 * atr_5m)
-                take_profit = entry_price + (6 * atr_5m) if signal == 'Long' else entry_price - (6 * atr_5m)
+                stop_loss = entry_price - (5 * atr_1m) if signal == 'Long' else entry_price + (5 * atr_1m)
+                take_profit = entry_price + (6 * atr_1m) if signal == 'Long' else entry_price - (6 * atr_1m)
                 self.highest_price = entry_price if signal == 'Long' else float('inf')
                 self.lowest_price = entry_price if signal == 'Short' else 0
                 self.trailing_stop = stop_loss
@@ -225,18 +202,25 @@ class BacktestBot:
                 # به‌روزرسانی Trailing Stop
                 if position == 'Long':
                     self.highest_price = max(self.highest_price, current_price)
-                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (5 * atr_5m))
+                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (5 * atr_1m))
                 elif position == 'Short':
                     self.lowest_price = min(self.lowest_price, current_price)
-                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (5 * atr_5m))
+                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (5 * atr_1m))
+
+                # محاسبه سود فعلی
+                current_profit = 0.0
+                if position == 'Long':
+                    current_profit = ((current_price - entry_price) / entry_price) * 100
+                elif position == 'Short':
+                    current_profit = ((entry_price - current_price) / entry_price) * 100
 
                 exit_position = False
-                if position == 'Long' and not pd.isna(rsi_5m) and rsi_5m > 75:
+                if position == 'Long' and not pd.isna(rsi_1m) and rsi_1m > 80 and current_profit >= 1.0:
                     exit_position = True
-                    logger.info(f"Closing Long due to RSI overbought: {rsi_5m}")
-                elif position == 'Short' and not pd.isna(rsi_5m) and rsi_5m < 25:
+                    logger.info(f"Closing Long due to RSI overbought: {rsi_1m}")
+                elif position == 'Short' and not pd.isna(rsi_1m) and rsi_1m < 20 and current_profit >= 1.0:
                     exit_position = True
-                    logger.info(f"Closing Short due to RSI oversold: {rsi_5m}")
+                    logger.info(f"Closing Short due to RSI oversold: {rsi_1m}")
 
                 if position == 'Long':
                     if (exit_position or current_price <= self.trailing_stop or 
@@ -255,8 +239,8 @@ class BacktestBot:
                         position = None
                         trades += 1
 
-        initial_price = self.df_5m['close'].iloc[0]
-        final_price = self.df_5m['close'].iloc[-1]
+        initial_price = self.df_1m['close'].iloc[0]
+        final_price = self.df_1m['close'].iloc[-1]
         hodl_value = (self.initial_balance / initial_price) * final_price
 
         logger.info("Backtest completed!")

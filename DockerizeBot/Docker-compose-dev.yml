@@ -1,83 +1,75 @@
 version: '3.8'
 
 services:
+
   db:
-    image: postgres:13
-    container_name: postgres
-    env_file: ./envs/dev/conf.env
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    image: postgres:15
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data/
+    env_file:
+      - ./envs/dev/.env
     ports:
       - "5432:5432"
 
   redis:
-    image: redis:alpine
-    container_name: redis
+    image: redis:7
     ports:
       - "6379:6379"
 
   django:
     build:
-      context: ./Dockerfiles/dev/app/
-      dockerfile: Dockerfile
-    container_name: django
-    # command: python manage.py runserver 0.0.0.0:8000
+      context: .
+      dockerfile: ./docker/dev/django/Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
     volumes:
-      - ./app:/app
-    working_dir: /app
+      - ./app:/usr/src/app
     ports:
       - "8000:8000"
     env_file:
-      - .env
+      - ./envs/dev/.env
     depends_on:
       - db
       - redis
+    working_dir: /usr/src/app
 
   bot_1h:
     build:
-      context: ./Dockerfiles/dev/worker/
-      dockerfile: Dockerfile
-    container_name: bot_1h
+      context: .
+      dockerfile: ./docker/dev/worker/Dockerfile
+    command: python bot_1h.py
     volumes:
-      - ./worker:/app
-      - ./shared:/app/shared
+      - ./worker:/usr/src/worker
+    env_file:
+      - ./envs/dev/.env
     depends_on:
-      - django
-    # command: python bot_1h.py
-    env_file: 
-      - ./envs/dev/conf.env
+      - redis
+    working_dir: /usr/src/worker
 
   bot_15m:
     build:
-      context: ./Dockerfiles/dev/worker/
-      dockerfile: Dockerfile
-    container_name: bot_15m
+      context: .
+      dockerfile: ./docker/dev/worker/Dockerfile
+    command: python bot_15m.py
     volumes:
-      - ./worker:/app
-      - ./shared:/app/shared
+      - ./worker:/usr/src/worker
+    env_file:
+      - ./envs/dev/.env
     depends_on:
-      - django
-    # command: python bot_15m.py
-    env_file: 
-      - ./envs/dev/conf.env
+      - redis
+    working_dir: /usr/src/worker
 
   bot_5m:
     build:
-      context: ./Dockerfiles/dev/worker/
-      dockerfile: Dockerfile
-    container_name: bot_5m
+      context: .
+      dockerfile: ./docker/dev/worker/Dockerfile
+    command: python bot_5m.py
     volumes:
-      - ./worker:/app
-      - ./shared:/app/shared
+      - ./worker:/usr/src/worker
+    env_file:
+      - ./envs/dev/.env
     depends_on:
-      - django
-    # command: python bot_5m.py
-    env_file: 
-      - ./envs/dev/conf.env
+      - redis
+    working_dir: /usr/src/worker
 
 volumes:
   postgres_data:
