@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:13
+    container_name: postgres
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+
+  django:
+    build:
+      context: ./multi_time_frame_django
+      dockerfile: Dockerfile
+    container_name: django
+    # command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./multi_time_frame_django:/app
+    working_dir: /app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+
+  bot_1h:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: bot_1h
+    volumes:
+      - ./worker:/app
+      - ./shared:/app/shared
+    depends_on:
+      - django
+    # command: python bot_1h.py
+    env_file:
+      - .env
+
+  bot_15m:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: bot_15m
+    volumes:
+      - ./worker:/app
+      - ./shared:/app/shared
+    depends_on:
+      - django
+    # command: python bot_15m.py
+    env_file:
+      - .env
+
+  bot_5m:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: bot_5m
+    volumes:
+      - ./worker:/app
+      - ./shared:/app/shared
+    depends_on:
+      - django
+    # command: python bot_5m.py
+    env_file:
+      - .env
+
+volumes:
+  postgres_data:

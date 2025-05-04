@@ -87,11 +87,16 @@ class BacktestBot:
             indicators_data['Senkou_Span_B'] = pd.Series([float('nan')] * len(df))
             indicators_data['Chikou_Span'] = pd.Series([float('nan')] * len(df))
 
-        # میانگین حجم 20 کندل
+        # میانگین حجم 20 کندل و 50 کندل
         if len(df) >= 20:
             indicators_data['Volume_MA20'] = df['volume'].rolling(window=20).mean()
         else:
             indicators_data['Volume_MA20'] = pd.Series([float('nan')] * len(df))
+
+        if len(df) >= 50:
+            indicators_data['Volume_MA50'] = df['volume'].rolling(window=50).mean()
+        else:
+            indicators_data['Volume_MA50'] = pd.Series([float('nan')] * len(df))
 
         # RSI
         if len(df) >= 14:
@@ -184,6 +189,7 @@ class BacktestBot:
             atr_5m = indicators_5m['ATR'].iloc[-1]
             adx_5m = indicators_5m['ADX'].iloc[-1]
             volume_ma20_5m = indicators_5m['Volume_MA20'].iloc[-1]
+            volume_ma50_5m = indicators_5m['Volume_MA50'].iloc[-1]
             rsi_5m = indicators_5m['RSI'].iloc[-1]
             macd_5m = indicators_5m['MACD'].iloc[-1]
             macd_signal_5m = indicators_5m['MACD_Signal'].iloc[-1]
@@ -193,14 +199,14 @@ class BacktestBot:
             signal = 'Neutral'
             if (not pd.isna(sma20_5m) and not pd.isna(sma50_5m) and not pd.isna(sma20_prev_5m) and 
                 not pd.isna(sma50_prev_5m) and not pd.isna(adx_5m) and not pd.isna(volume_ma20_5m) and
-                not pd.isna(macd_5m) and not pd.isna(macd_signal_5m)):
+                not pd.isna(volume_ma50_5m) and not pd.isna(macd_5m) and not pd.isna(macd_signal_5m)):
                 if (sma20_prev_5m <= sma50_prev_5m and sma20_5m > sma50_5m and 
-                    adx_5m > 25 and current_volume > volume_ma20_5m and higher_tf_signal == 'Long' and
-                    macd_5m > macd_signal_5m):
+                    adx_5m > 25 and current_volume > volume_ma20_5m and current_volume > volume_ma50_5m and
+                    higher_tf_signal == 'Long' and macd_5m > macd_signal_5m):
                     signal = 'Long'
                 elif (sma20_prev_5m >= sma50_prev_5m and sma20_5m < sma50_5m and 
-                      adx_5m > 25 and current_volume > volume_ma20_5m and higher_tf_signal == 'Short' and
-                      macd_5m < macd_signal_5m):
+                      adx_5m > 25 and current_volume > volume_ma20_5m and current_volume > volume_ma50_5m and
+                      higher_tf_signal == 'Short' and macd_5m < macd_signal_5m):
                     signal = 'Short'
 
             if position is None and signal != 'Neutral':
@@ -208,7 +214,7 @@ class BacktestBot:
                 quantity = position_size / current_price
                 entry_price = current_price
                 position = signal
-                stop_loss = entry_price - (7 * atr_5m) if signal == 'Long' else entry_price + (7 * atr_5m)
+                stop_loss = entry_price - (5 * atr_5m) if signal == 'Long' else entry_price + (5 * atr_5m)
                 take_profit = entry_price + (6 * atr_5m) if signal == 'Long' else entry_price - (6 * atr_5m)
                 self.highest_price = entry_price if signal == 'Long' else float('inf')
                 self.lowest_price = entry_price if signal == 'Short' else 0
@@ -219,16 +225,16 @@ class BacktestBot:
                 # به‌روزرسانی Trailing Stop
                 if position == 'Long':
                     self.highest_price = max(self.highest_price, current_price)
-                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (7 * atr_5m))
+                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (5 * atr_5m))
                 elif position == 'Short':
                     self.lowest_price = min(self.lowest_price, current_price)
-                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (7 * atr_5m))
+                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (5 * atr_5m))
 
                 exit_position = False
-                if position == 'Long' and not pd.isna(rsi_5m) and rsi_5m > 80:
+                if position == 'Long' and not pd.isna(rsi_5m) and rsi_5m > 75:
                     exit_position = True
                     logger.info(f"Closing Long due to RSI overbought: {rsi_5m}")
-                elif position == 'Short' and not pd.isna(rsi_5m) and rsi_5m < 20:
+                elif position == 'Short' and not pd.isna(rsi_5m) and rsi_5m < 25:
                     exit_position = True
                     logger.info(f"Closing Short due to RSI oversold: {rsi_5m}")
 
