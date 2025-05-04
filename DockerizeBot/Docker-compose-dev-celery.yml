@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-
   db:
     image: postgres:15
     container_name: postgres
@@ -14,7 +13,6 @@ services:
       - "5432:5432"
     volumes:
       - .postgres/DATA:/var/lib/postgresql/data
-      - /var/run/docker.sock:/var/run/docker.sock 
 
   redis:
     image: redis:7
@@ -39,13 +37,26 @@ services:
       - redis
     working_dir: /usr/src/app
 
-  celery:
+  celery_worker:
+    build:
+      context: .
+      dockerfile: ./docker/dev/django/Dockerfile
+    command: celery -A multi_time_frame_django worker --loglevel=info
+    volumes:
+      - ./app:/usr/src/app
+    env_file:
+      - ./envs/dev/.env
+    depends_on:
+      - django
+      - redis
+
+  celery_beat:
     build:
       context: .
       dockerfile: ./docker/dev/django/Dockerfile
     command: celery -A multi_time_frame_django beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     volumes:
-      - .:/code
+      - ./app:/usr/src/app
     env_file:
       - ./envs/dev/.env
     depends_on:
@@ -59,8 +70,4 @@ services:
       - "5555:5555"
     depends_on:
       - redis
-      - celery
-
-
-volumes:
-  postgres_data:
+      - celery_worker
