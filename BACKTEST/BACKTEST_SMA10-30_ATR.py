@@ -29,9 +29,9 @@ class BacktestBot:
         self.lowest_price = float('inf')
 
         # لود داده‌ها
-        self.df_5m = pd.read_csv('../BTCUSDT_5m_historical.csv')
-        self.df_15m = pd.read_csv('../BTCUSDT_15m_historical.csv')
-        self.df_1h = pd.read_csv('../BTCUSDT_1h_historical.csv')
+        self.df_5m = pd.read_csv('./BTCUSDT_5m_historical.csv')
+        self.df_15m = pd.read_csv('./BTCUSDT_15m_historical.csv')
+        self.df_1h = pd.read_csv('./BTCUSDT_1h_historical.csv')
 
         # محاسبه HODL
         self.hodl_btc = initial_balance / self.df_5m['close'].iloc[0]
