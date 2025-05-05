@@ -49,6 +49,8 @@ INSTALLED_APPS = [
     'robot_fifteen', 
     'robot_hourly',
     'django_celery_beat',
+    "indicators",
+    "ocilators",
 ]
 
 

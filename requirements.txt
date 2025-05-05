@@ -7,3 +7,4 @@ python-decouple
 django-cors-headers
 django-celery-beat
 flower
+numpy
