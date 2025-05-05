@@ -9,7 +9,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backtest_log_EMA_StochRSI_1m.log'),
+        logging.FileHandler('backtest_log_EMA_MACD_Trend_1m.log'),
         logging.StreamHandler()
     ]
 )
@@ -55,12 +55,18 @@ class BacktestBot:
 
     def calculate_indicators(self, df):
         indicators_data = {}
-        # EMA 8 و EMA 21
+        # EMA 5 و EMA 13
+        if len(df) >= 13:
+            indicators_data['EMA5'] = ta.trend.EMAIndicator(df['close'], window=5).ema_indicator()
+            indicators_data['EMA13'] = ta.trend.EMAIndicator(df['close'], window=13).ema_indicator()
+        else:
+            indicators_data['EMA5'] = pd.Series([float('nan')] * len(df), index=df.index)
+            indicators_data['EMA13'] = pd.Series([float('nan')] * len(df), index=df.index)
+
+        # EMA 21 برای فیلتر روند
         if len(df) >= 21:
-            indicators_data['EMA8'] = ta.trend.EMAIndicator(df['close'], window=8).ema_indicator()
             indicators_data['EMA21'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
         else:
-            indicators_data['EMA8'] = pd.Series([float('nan')] * len(df), index=df.index)
             indicators_data['EMA21'] = pd.Series([float('nan')] * len(df), index=df.index)
 
         # ATR
@@ -69,16 +75,14 @@ class BacktestBot:
         else:
             indicators_data['ATR'] = pd.Series([float('nan')] * len(df), index=df.index)
 
-        # Stochastic RSI
-        if len(df) >= 14:
-            stoch_rsi = ta.momentum.StochRSIIndicator(df['close'], window=14, smooth1=3, smooth2=3)
-            indicators_data['StochRSI'] = stoch_rsi.stochrsi()
-            indicators_data['StochRSI_K'] = stoch_rsi.stochrsi_k()
-            indicators_data['StochRSI_D'] = stoch_rsi.stochrsi_d()
+        # MACD
+        if len(df) >= 21:
+            macd = ta.trend.MACD(df['close'], window_fast=8, window_slow=21, window_sign=5)
+            indicators_data['MACD'] = macd.macd()
+            indicators_data['MACD_Signal'] = macd.macd_signal()
         else:
-            indicators_data['StochRSI'] = pd.Series([float('nan')] * len(df), index=df.index)
-            indicators_data['StochRSI_K'] = pd.Series([float('nan')] * len(df), index=df.index)
-            indicators_data['StochRSI_D'] = pd.Series([float('nan')] * len(df), index=df.index)
+            indicators_data['MACD'] = pd.Series([float('nan')] * len(df), index=df.index)
+            indicators_data['MACD_Signal'] = pd.Series([float('nan')] * len(df), index=df.index)
 
         return indicators_data
 
@@ -127,12 +131,13 @@ class BacktestBot:
         quantity = 0.0
         stop_loss = 0.0
         take_profit = 0.0
+        signal_count = {'Long': 0, 'Short': 0}  # برای شمارش سیگنال‌ها
 
         # پیش‌محاسبه شاخص‌ها برای کل دیتافریم 1 دقیقه
         indicators_1m = self.calculate_indicators(self.df_1m)
 
         # اجرای بک‌تست
-        min_data_length = 14  # حداقل تعداد کندل برای ATR و Stochastic RSI
+        min_data_length = 21  # حداقل تعداد کندل برای EMA21 و MACD
         for index, row in self.df_1m.iterrows():
             if index < min_data_length - 1:  # صبر تا وقتی داده‌ها کافی باشه
                 continue
@@ -150,23 +155,31 @@ class BacktestBot:
             current_equity = self.balance + unrealized_pnl
             self.equity_history.append(current_equity)
 
-            ema8 = indicators_1m['EMA8'].iloc[index]
+            ema5 = indicators_1m['EMA5'].iloc[index]
+            ema13 = indicators_1m['EMA13'].iloc[index]
+            ema5_prev = indicators_1m['EMA5'].iloc[index - 1] if index > 0 else float('nan')
+            ema13_prev = indicators_1m['EMA13'].iloc[index - 1] if index > 0 else float('nan')
             ema21 = indicators_1m['EMA21'].iloc[index]
-            ema8_prev = indicators_1m['EMA8'].iloc[index - 1] if index > 0 else float('nan')
-            ema21_prev = indicators_1m['EMA21'].iloc[index - 1] if index > 0 else float('nan')
             atr = indicators_1m['ATR'].iloc[index]
-            stoch_rsi_k = indicators_1m['StochRSI_K'].iloc[index]
-            stoch_rsi_d = indicators_1m['StochRSI_D'].iloc[index]
+            macd = indicators_1m['MACD'].iloc[index]
+            macd_signal = indicators_1m['MACD_Signal'].iloc[index]
 
             signal = 'Neutral'
-            if (not pd.isna(ema8) and not pd.isna(ema21) and not pd.isna(ema8_prev) and 
-                not pd.isna(ema21_prev) and not pd.isna(stoch_rsi_k) and not pd.isna(stoch_rsi_d)):
-                if (ema8_prev <= ema21_prev and ema8 > ema21 and 
-                    stoch_rsi_k > stoch_rsi_d and 10 < stoch_rsi_k < 90):
+            if (not pd.isna(ema5) and not pd.isna(ema13) and not pd.isna(ema5_prev) and 
+                not pd.isna(ema13_prev) and not pd.isna(ema21) and 
+                not pd.isna(macd) and not pd.isna(macd_signal)):
+                # محاسبه فاصله نسبی بین EMAها
+                ema_diff = abs(ema5 - ema13) / ema13 * 100  # فاصله به درصد
+                if (ema5_prev <= ema13_prev and ema5 > ema13 and 
+                    ema_diff >= 0.05 and macd > macd_signal and ema13 > ema21):
                     signal = 'Long'
-                elif (ema8_prev >= ema21_prev and ema8 < ema21 and 
-                      stoch_rsi_k < stoch_rsi_d and 10 < stoch_rsi_k < 90):
+                    signal_count['Long'] += 1
+                elif (ema5_prev >= ema13_prev and ema5 < ema13 and 
+                      ema_diff >= 0.05 and macd < macd_signal and ema13 < ema21):
                     signal = 'Short'
+                    signal_count['Short'] += 1
+            else:
+                logger.debug(f"Missing data at index {index}: EMA5={ema5}, EMA13={ema13}, EMA5_prev={ema5_prev}, EMA13_prev={ema13_prev}, EMA21={ema21}, MACD={macd}, MACD_Signal={macd_signal}")
 
             if position is None and signal != 'Neutral':
                 if self.balance <= 0:
@@ -176,8 +189,8 @@ class BacktestBot:
                 quantity = position_size / current_price
                 entry_price = current_price
                 position = signal
-                stop_loss = entry_price - (2 * atr) if signal == 'Long' else entry_price + (2 * atr)
-                take_profit = entry_price + (3 * atr) if signal == 'Long' else entry_price - (3 * atr)
+                stop_loss = entry_price - (1.5 * atr) if signal == 'Long' else entry_price + (1.5 * atr)
+                take_profit = entry_price + (4.5 * atr) if signal == 'Long' else entry_price - (4.5 * atr)
                 self.highest_price = entry_price if signal == 'Long' else float('inf')
                 self.lowest_price = entry_price if signal == 'Short' else 0
                 self.trailing_stop = stop_loss
@@ -188,28 +201,13 @@ class BacktestBot:
                 # به‌روزرسانی Trailing Stop
                 if position == 'Long':
                     self.highest_price = max(self.highest_price, current_price)
-                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (2 * atr))
+                    self.trailing_stop = max(self.trailing_stop, self.highest_price - (1.5 * atr))
                 elif position == 'Short':
                     self.lowest_price = min(self.lowest_price, current_price)
-                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (2 * atr))
-
-                # محاسبه سود فعلی (درصد)
-                current_profit = 0.0
-                if position == 'Long':
-                    current_profit = ((current_price - entry_price) / entry_price) * 100
-                elif position == 'Short':
-                    current_profit = ((entry_price - current_price) / entry_price) * 100
-
-                exit_position = False
-                if position == 'Long' and not pd.isna(stoch_rsi_k) and stoch_rsi_k > 80 and current_profit >= 0.5:
-                    exit_position = True
-                    logger.info(f"Closing Long due to StochRSI overbought: {stoch_rsi_k}")
-                elif position == 'Short' and not pd.isna(stoch_rsi_k) and stoch_rsi_k < 20 and current_profit >= 0.5:
-                    exit_position = True
-                    logger.info(f"Closing Short due to StochRSI oversold: {stoch_rsi_k}")
+                    self.trailing_stop = min(self.trailing_stop, self.lowest_price + (1.5 * atr))
 
                 if position == 'Long':
-                    if (exit_position or current_price <= self.trailing_stop or 
+                    if (current_price <= self.trailing_stop or 
                         current_price >= take_profit or signal == 'Short'):
                         position_size = quantity * entry_price
                         profit = (current_price - entry_price) * quantity * self.leverage
@@ -220,7 +218,7 @@ class BacktestBot:
                         logger.info(f"Closed Long at {current_price}, Profit: {profit:.2f}, Fee: {fee:.4f}, Net Profit: {net_profit:.2f}, Balance: {self.balance:.2f}")
                         position = None
                 elif position == 'Short':
-                    if (exit_position or current_price >= self.trailing_stop or 
+                    if (current_price >= self.trailing_stop or 
                         current_price <= take_profit or signal == 'Long'):
                         position_size = quantity * entry_price
                         profit = (entry_price - current_price) * quantity * self.leverage
@@ -230,6 +228,10 @@ class BacktestBot:
                         self.trades.append({'type': 'Short', 'profit': net_profit, 'entry_price': entry_price, 'exit_price': current_price})
                         logger.info(f"Closed Short at {current_price}, Profit: {profit:.2f}, Fee: {fee:.4f}, Net Profit: {net_profit:.2f}, Balance: {self.balance:.2f}")
                         position = None
+
+        # گزارش تعداد سیگنال‌ها
+        logger.info(f"Total Long signals: {signal_count['Long']}")
+        logger.info(f"Total Short signals: {signal_count['Short']}")
 
         # محاسبه ارزش نهایی HODL
         initial_price = self.df_1m['close'].iloc[0]
