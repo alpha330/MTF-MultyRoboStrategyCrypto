@@ -7,9 +7,9 @@ from time import sleep
 exchange = ccxt.bybit({'enableRateLimit': True})
 
 # تایم‌فریم‌ها و مدت زمان
-timeframes = {"1m":"1m",'5m': '5m', '15m': '15m', '1h': '1h'}
+timeframes = {"30m":"30m"}
 symbol = 'BTC/USDT:USDT'
-days = 180  # ۶ ماه (۱۸۰ روز)
+days = 720  # ۶ ماه (۱۸۰ روز)
 
 # تاریخ شروع و پایان
 end_date = datetime.datetime(2025, 5, 1)  # ۱ مه ۲۰۲۵
@@ -27,13 +27,17 @@ def fetch_and_save_historical_data():
 
         # محاسبه تعداد کندل‌های مورد انتظار
         if tf_name == '1m':
-            expected_candles = 180 * 24 * 60 // 1  # 259,000 کندل
+            expected_candles = days * 24 * 60 // 1  
         elif tf_name == '5m':
-            expected_candles = 180 * 24 * 60 // 5  # ۵۱,۸۴۰ کندل
+            expected_candles = days * 24 * 60 // 5  
         elif tf_name == '15m':
-            expected_candles = 180 * 24 * 60 // 15  # ۱۷,۲۸۰ کندل
-        else:  # ۱h
-            expected_candles = 180 * 24  # ۴,۳۲۰ کندل
+            expected_candles = days * 24 * 60 // 15 
+        elif tf_name == '30m':
+            expected_candles = days * 24 * 60 // 30 
+        elif tf_name == '1h':
+            expected_candles = days * 24 * 60 // 60  
+        elif tf_name == '4h':
+            expected_candles = days * 24 * 60 // 240 
 
         while current_since < end_timestamp:
             retries = 0
