@@ -15,6 +15,9 @@ API_SECRET = os.getenv('BYBIT_TESTNET_API_SECRET')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
+# TELEGRAM_TOKEN=7520226266:AAHMt5VU6qE_DOaWk0MO25QgqpWqcReUgtk
+# TELEGRAM_CHAT_ID=106028172
+
 # Validate environment variables
 if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
     raise ValueError("Missing required environment variables in .env file")
