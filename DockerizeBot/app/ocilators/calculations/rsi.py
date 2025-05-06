@@ -1,6 +1,9 @@
 import pandas as pd
 
 def calculate_rsi_series(prices, period=14):
+    if len(prices) < period + 1:
+        raise ValueError("Not enough data to calculate RSI")
+
     prices = pd.Series(prices)
     delta = prices.diff()
     gain = delta.clip(lower=0)
@@ -12,7 +15,7 @@ def calculate_rsi_series(prices, period=14):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
 
-    return rsi
+    return rsi.iloc[-1]
 
 
 def calculate_rsi(prices, period=14):
