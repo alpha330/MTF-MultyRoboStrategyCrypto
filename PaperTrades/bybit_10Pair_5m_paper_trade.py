@@ -29,7 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/root/MTF-MultyRoboStrategyCrypto/initialBot/trading_xrp_5m_paper_mainnet.log'),
+        logging.FileHandler('/root/MTF-MultyRoboStrategyCrypto/initialBot/bybit_10Pair_5m_paper_trade.log'),
         logging.StreamHandler()
     ]
 )
@@ -37,8 +37,12 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN_PAPER_XRP')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN_PAPER1M_10')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHANAL_ID')
+
+# Validate environment variables
+if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
+    raise ValueError("Missing required Telegram environment variables in .env file")
 
 # Telegram Bot Setup
 try:
@@ -47,8 +51,30 @@ except Exception as e:
     logger.error(f"{bcolors.FAIL}Error initializing Telegram bot: {e}")
     raise
 
+class Wallet:
+    def __init__(self, initial_balance=100):
+        self.balance = initial_balance
+        self.positions = []  # All open positions across all pairs
+        self.trade_history = []  # All closed positions
+        self.fee_rate = 0.00075  # 0.075% taker fee
+        self.max_margin_ratio = 0.6  # Use up to 60% of balance for margin
+
+    def get_used_margin(self):
+        used_margin = 0
+        for pos in self.positions:
+            position_value = pos['quantity'] * pos['entry_price']
+            margin = position_value / pos['leverage']
+            used_margin += margin
+        return used_margin
+
+    def can_open_position(self, position_value, leverage):
+        margin_required = position_value / leverage
+        used_margin = self.get_used_margin()
+        max_allowed_margin = self.balance * self.max_margin_ratio
+        return used_margin + margin_required <= max_allowed_margin
+
 class TradingBot:
-    def __init__(self, symbol='XRP/USDT:USDT', timeframe='5m', leverage=5, risk_percent=0.02, initial_balance=100):
+    def __init__(self, symbol, timeframe='5m', leverage=5, risk_percent=0.02, wallet=None):
         self.symbol = symbol
         self.timeframe = timeframe
         self.leverage = leverage
@@ -60,14 +86,7 @@ class TradingBot:
         if self.symbol not in self.exchange.markets:
             logger.error(f"{bcolors.FAIL}Symbol {self.symbol} Not Exists")
             raise ValueError(f"Symbol {self.symbol} Not Exists")
-        
-        # Paper trading wallet
-        self.balance = initial_balance  # Starting balance in USDT
-        self.positions = []  # List to store open positions
-        self.trade_history = []  # List to store closed positions
-        self.fee_rate = 0.00075  # 0.075% taker fee
-
-        # Simulate leverage setting
+        self.wallet = wallet
         self._set_leverage()
 
     def _set_leverage(self):
@@ -92,16 +111,11 @@ class TradingBot:
 
     def calculate_indicators(self, df):
         indicators_data = {}
-        # EMA 9
         indicators_data['EMA9'] = ta.trend.EMAIndicator(df['close'], window=9).ema_indicator()
-        # VWAP
         indicators_data['VWAP'] = ta.volume.VolumeWeightedAveragePrice(df['high'], df['low'], df['close'], df['volume'], window=14).volume_weighted_average_price()
-        # RSI 14
         indicators_data['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-        # Volume and Volume MA
         indicators_data['Volume'] = df['volume']
         indicators_data['Volume_MA'] = ta.trend.SMAIndicator(df['volume'], window=20).sma_indicator()
-        # Swing High/Low for Price Action
         indicators_data['Swing_High'] = df['high'].rolling(window=5, center=True).max()
         indicators_data['Swing_Low'] = df['low'].rolling(window=5, center=True).min()
         return indicators_data
@@ -111,13 +125,15 @@ class TradingBot:
         if stop_loss_distance == 0:
             logger.error(f"{bcolors.WARNING}Stop Loss distance is zero, cannot calculate position size")
             return 0
-        risk_amount = self.balance * self.risk_percent
+        risk_amount = self.wallet.balance * self.risk_percent
         quantity = risk_amount / stop_loss_distance
-        # Effective balance with leverage
-        effective_balance = self.balance * self.leverage
+        effective_balance = self.wallet.balance * self.leverage
         max_quantity = effective_balance / price
         quantity = min(quantity, max_quantity)
-        # Round to precision
+        position_value = quantity * price
+        if not self.wallet.can_open_position(position_value, self.leverage):
+            logger.warning(f"{bcolors.WARNING}Cannot open position on {self.symbol}: Exceeds 60% balance margin limit")
+            return 0
         try:
             quantity = float(self.exchange.amount_to_precision(self.symbol, quantity))
         except:
@@ -125,8 +141,10 @@ class TradingBot:
         return quantity
 
     def get_open_position(self, side=None):
-        for pos in self.positions:
-            if side is None or (side == 'buy' and pos['side'] == 'Long') or (side == 'sell' and pos['side'] == 'Short'):
+        for pos in self.wallet.positions:
+            if pos['symbol'] == self.symbol and (side is None or 
+               (side == 'buy' and pos['side'] == 'Long') or 
+               (side == 'sell' and pos['side'] == 'Short')):
                 return pos
         return None
 
@@ -141,11 +159,11 @@ class TradingBot:
             else:  # Short
                 pnl = (entry_price - exit_price) * quantity
             # Apply fees
-            entry_fee = entry_price * quantity * self.fee_rate
-            exit_fee = exit_price * quantity * self.fee_rate
+            entry_fee = entry_price * quantity * self.wallet.fee_rate
+            exit_fee = exit_price * quantity * self.wallet.fee_rate
             total_pnl = pnl - entry_fee - exit_fee
             # Update balance
-            self.balance += total_pnl
+            self.wallet.balance += total_pnl
             # Determine Win/Loss
             status = 'Win' if total_pnl > 0 else 'Loss'
             # Store in trade history
@@ -164,15 +182,15 @@ class TradingBot:
                 'take_profit': position['take_profit'],
                 'timestamp': datetime.datetime.now().isoformat()
             }
-            self.trade_history.append(trade_record)
+            self.wallet.trade_history.append(trade_record)
             # Update or remove position
             if close_percentage < 1.0:
                 position['quantity'] *= (1 - close_percentage)
-                position['stop_loss'] = position['trailing_stop']  # Update to trailing stop
+                position['stop_loss'] = position['trailing_stop']
             else:
-                self.positions.remove(position)
-            logger.info(f"{bcolors.OKGREEN}POSITION CLOSED: {side}, Quantity: {quantity:.4f}, Entry: {entry_price:.4f}, Exit: {exit_price:.4f}, PnL: {total_pnl:.2f}, Reason: {reason}, Status: {status}")
-            logger.info(f"{bcolors.OKBLUE}New Balance: {self.balance:.2f} USDT")
+                self.wallet.positions.remove(position)
+            logger.info(f"{bcolors.OKGREEN}POSITION CLOSED: {side}, Symbol: {self.symbol}, Quantity: {quantity:.4f}, Entry: {entry_price:.4f}, Exit: {exit_price:.4f}, PnL: {total_pnl:.2f}, Reason: {reason}, Status: {status}")
+            logger.info(f"{bcolors.OKBLUE}New Balance: {self.wallet.balance:.2f} USDT, Used Margin: {self.wallet.get_used_margin():.2f} USDT")
             # Send Telegram notification
             try:
                 telegram_bot.send_message(
@@ -181,19 +199,20 @@ class TradingBot:
                          f"Side: {side}\nQuantity: {quantity:.4f}\n"
                          f"Entry Price: {entry_price:.4f}\nExit Price: {exit_price:.4f}\n"
                          f"PnL: {total_pnl:.2f} USDT ({status})\nReason: {reason}\n"
-                         f"New Balance: {self.balance:.2f} USDT"
+                         f"New Balance: {self.wallet.balance:.2f} USDT"
                 )
             except Exception as telegram_error:
                 logger.error(f"{bcolors.FAIL}Error sending Telegram message: {telegram_error}")
         except Exception as e:
-            logger.error(f"{bcolors.FAIL}EXCEPTION DURING CLOSE POSITION: {e}")
+            logger.error(f"{bcolors.FAIL}EXCEPTION DURING CLOSE POSITION on {self.symbol}: {e}")
 
     def check_tp_sl_trailing(self, current_price, ema9):
-        for pos in self.positions[:]:
+        for pos in self.wallet.positions[:]:
+            if pos['symbol'] != self.symbol:
+                continue
             stop_loss = pos['stop_loss']
             take_profit = pos['take_profit']
             side = pos['side']
-            # Check stop loss and take profit
             if side == 'Long':
                 if current_price <= stop_loss:
                     self.close_position(pos, stop_loss, reason='Stop Loss Hit')
@@ -222,10 +241,10 @@ class TradingBot:
                         self.close_position(pos, pos['trailing_stop'], reason='Trailing Stop Hit')
 
     def get_positions_stats(self):
-        total_positions = len(self.trade_history)
-        open_positions = len(self.positions)
-        win_positions = sum(1 for trade in self.trade_history if trade['status'] == 'Win')
-        loss_positions = sum(1 for trade in self.trade_history if trade['status'] == 'Loss')
+        total_positions = len([t for t in self.wallet.trade_history if t['symbol'] == self.symbol])
+        open_positions = len([p for p in self.wallet.positions if p['symbol'] == self.symbol])
+        win_positions = len([t for t in self.wallet.trade_history if t['symbol'] == self.symbol and t['status'] == 'Win'])
+        loss_positions = len([t for t in self.wallet.trade_history if t['symbol'] == self.symbol and t['status'] == 'Loss'])
         return {
             'total_positions': total_positions,
             'open_positions': open_positions,
@@ -259,7 +278,7 @@ class TradingBot:
                 swing_low = indicators_data['Swing_Low'].iloc[-1]
                 swing_high = indicators_data['Swing_High'].iloc[-1]
 
-                logger.info(f"{bcolors.OKCYAN}Indicators - EMA9: {ema9:.4f}, VWAP: {vwap:.4f}, RSI: {rsi:.2f}, Volume: {volume:.2f}, Volume MA: {volume_ma:.2f}, Swing Low: {swing_low:.4f}, Swing High: {swing_high:.4f}")
+                logger.info(f"{bcolors.OKCYAN}Indicators for {self.symbol} - EMA9: {ema9:.4f}, VWAP: {vwap:.4f}, RSI: {rsi:.2f}, Volume: {volume:.2f}, Volume MA: {volume_ma:.2f}, Swing Low: {swing_low:.4f}, Swing High: {swing_high:.4f}")
 
                 long_position = self.get_open_position(side='buy')
                 short_position = self.get_open_position(side='sell')
@@ -289,13 +308,13 @@ class TradingBot:
                     signal = 'Short'
 
                 if signal:
-                    logger.info(f"{bcolors.OKBLUE}Current Balance Before Opening Positions: {self.balance:.2f} USDT")
+                    logger.info(f"{bcolors.OKBLUE}Current Balance Before Opening Positions on {self.symbol}: {self.wallet.balance:.2f} USDT, Used Margin: {self.wallet.get_used_margin():.2f} USDT")
                     # Calculate stop loss and take profit (1%)
                     stop_loss = price * (1 - 0.01) if signal == 'Long' else price * (1 + 0.01)
                     take_profit = price * (1 + 0.01) if signal == 'Long' else price * (1 - 0.01)
                     quantity = self.calculate_position_size(price, stop_loss)
-                    if quantity == 0 or quantity * price > self.balance * self.leverage:
-                        logger.warning(f"{bcolors.WARNING}Cannot Open Positions: Insufficient Margin or Zero Quantity")
+                    if quantity == 0:
+                        logger.warning(f"{bcolors.WARNING}Cannot Open Position on {self.symbol}: Zero Quantity or Margin Limit")
                         time.sleep(60)
                         continue
 
@@ -319,8 +338,8 @@ class TradingBot:
                             'timestamp': datetime.datetime.now().isoformat(),
                             'first_target_hit': False
                         }
-                        self.positions.append(position)
-                        logger.info(f"{bcolors.OKBLUE}Order created successfully (Paper Trading): {position}")
+                        self.wallet.positions.append(position)
+                        logger.info(f"{bcolors.OKBLUE}Order created successfully on {self.symbol} (Paper Trading): {position}")
 
                         # Send Telegram notification
                         try:
@@ -333,13 +352,14 @@ class TradingBot:
                                      f"Entry Price: {price:.4f}\n"
                                      f"Stop Loss: {stop_loss:.4f}\n"
                                      f"Take Profit: {take_profit:.4f}\n"
-                                     f"Balance: {self.balance:.2f} USDT"
+                                     f"Balance: {self.wallet.balance:.2f} USDT\n"
+                                     f"Used Margin: {self.wallet.get_used_margin():.2f} USDT"
                             )
                         except Exception as telegram_error:
                             logger.error(f"{bcolors.FAIL}Error sending Telegram message: {telegram_error}")
 
                     except Exception as e:
-                        logger.error(f"{bcolors.FAIL}Exception During Opening Position: {e}")
+                        logger.error(f"{bcolors.FAIL}Exception During Opening Position on {self.symbol}: {e}")
                         try:
                             telegram_bot.send_message(
                                 chat_id=TELEGRAM_CHAT_ID,
@@ -361,7 +381,7 @@ class TradingBot:
             telegram_bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=f"Trading bot for {self.symbol} ({self.timeframe}) stopped (Paper Trading, Mainnet)\n"
-                     f"Final Balance: {self.balance:.2f} USDT"
+                     f"Final Balance: {self.wallet.balance:.2f} USDT"
             )
         except Exception as telegram_error:
             logger.error(f"{bcolors.FAIL}Error sending Telegram message: {telegram_error}")
@@ -369,17 +389,17 @@ class TradingBot:
     def get_status(self):
         df = self.fetch_ohlcv()
         if df is None:
-            return "Error fetching data"
+            return f"Error fetching data for {self.symbol}"
 
         indicators = self.calculate_indicators(df)
         long_pos = self.get_open_position(side='buy')
         short_pos = self.get_open_position(side='sell')
 
-        status = f"Bot Status ({self.timeframe}) (Paper Trading, Mainnet):\n"
-        status += f"Symbol: {self.symbol}\n"
+        status = f"Bot Status for {self.symbol} ({self.timeframe}) (Paper Trading, Mainnet):\n"
         status += f"Running: {self.running}\n"
         status += f"Last Signal: {self.last_signal}\n"
-        status += f"Balance: {self.balance:.2f} USDT\n"
+        status += f"Balance: {self.wallet.balance:.2f} USDT\n"
+        status += f"Used Margin: {self.wallet.get_used_margin():.2f} USDT\n"
         status += f"EMA9: {indicators.get('EMA9', pd.Series([0])).iloc[-1]:.4f}\n"
         status += f"VWAP: {indicators.get('VWAP', pd.Series([0])).iloc[-1]:.4f}\n"
         status += f"RSI: {indicators.get('RSI', pd.Series([0])).iloc[-1]:.2f}\n"
@@ -392,9 +412,10 @@ class TradingBot:
 class BotManager:
     def __init__(self):
         self.bots = []
+        self.wallet = Wallet(initial_balance=100)
 
     def add_bot(self, symbol, timeframe):
-        bot = TradingBot(symbol, timeframe)
+        bot = TradingBot(symbol, timeframe, wallet=self.wallet)
         self.bots.append(bot)
         return bot
 
@@ -407,15 +428,15 @@ async def start(update, context):
     global manager
     for bot in manager.bots:
         bot.running = True
-    await update.message.reply_text("Trading bot started (Paper Trading, Mainnet)")
-    logger.info(f"{bcolors.OKGREEN}Bot started via Telegram (Paper Trading, Mainnet)")
+    await update.message.reply_text("Trading bots started (Paper Trading, Mainnet)")
+    logger.info(f"{bcolors.OKGREEN}Bots started via Telegram (Paper Trading, Mainnet)")
 
 async def stop(update, context):
     global manager
     for bot in manager.bots:
         bot.stop()
-    await update.message.reply_text("Trading bot stopped (Paper Trading, Mainnet)")
-    logger.info(f"{bcolors.WARNING}Bot stopped via Telegram (Paper Trading, Mainnet)")
+    await update.message.reply_text("Trading bots stopped (Paper Trading, Mainnet)")
+    logger.info(f"{bcolors.WARNING}Bots stopped via Telegram (Paper Trading, Mainnet)")
 
 async def status(update, context):
     global manager
@@ -435,6 +456,8 @@ async def positions(update, context):
         stats += f"Open Positions: {pos_stats['open_positions']}\n"
         stats += f"Win Positions: {pos_stats['win_positions']}\n"
         stats += f"Loss Positions: {pos_stats['loss_positions']}\n\n"
+    stats += f"Wallet Balance: {manager.wallet.balance:.2f} USDT\n"
+    stats += f"Used Margin: {manager.wallet.get_used_margin():.2f} USDT\n"
     await update.message.reply_text(stats)
     logger.info(f"{bcolors.OKCYAN}Positions stats requested via Telegram (Paper Trading, Mainnet)")
 
@@ -454,10 +477,27 @@ def main():
     global manager
     manager = BotManager()
 
-    bot = manager.add_bot(
-        symbol='XRP/USDT:USDT',
-        timeframe='5m'
-    )
+    # List of trading pairs
+    trading_pairs = [
+        'XRP/USDT:USDT',
+        'BTC/USDT:USDT',
+        'ETH/USDT:USDT',
+        'BNB/USDT:USDT',
+        'ADA/USDT:USDT',
+        'SOL/USDT:USDT',
+        'DOGE/USDT:USDT',
+        'DOT/USDT:USDT',
+        'MATIC/USDT:USDT',
+        'LINK/USDT:USDT'
+    ]
+
+    # Add bots for each trading pair
+    for symbol in trading_pairs:
+        try:
+            manager.add_bot(symbol=symbol, timeframe='5m')
+            logger.info(f"{bcolors.OKGREEN}Bot added for {symbol}")
+        except Exception as e:
+            logger.error(f"{bcolors.FAIL}Failed to add bot for {symbol}: {e}")
 
     manager.start_all()
 
@@ -465,7 +505,7 @@ def main():
     try:
         telegram_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text="Trading bot initialized (Paper Trading, Mainnet)"
+            text="Trading bots initialized for multiple pairs (Paper Trading, Mainnet)"
         )
     except Exception as e:
         logger.error(f"{bcolors.FAIL}Error sending test message: {e}")

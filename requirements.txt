@@ -8,3 +8,5 @@ django-cors-headers
 django-celery-beat
 flower
 numpy
+pybit
+tenacity
