@@ -41,7 +41,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(log_dir, 'PersianCheetah_Scalper_Bybit_V2.log')),
+        logging.FileHandler(os.path.join(log_dir, 'PersianCheetah_Scalper_Bybit.log')),
         logging.StreamHandler()
     ]
 )
@@ -89,15 +89,15 @@ class Wallet:
         return used_margin + margin_required <= max_allowed_margin
 
 class PersianCheetahScalper:
-    def __init__(self, symbol, timeframe='1m', leverage=10, risk_percent=0.01, wallet=None):
+    def __init__(self, symbol, timeframe='1m', leverage=20, risk_percent=0.01, wallet=None):
         self.symbol = symbol
         self.timeframe = timeframe
-        self.leverage = 5 if 'XRP' in symbol else 10
+        self.leverage = 10 if 'XRP' in symbol else 20  # 2 برابر لوریج قبلی
         self.risk_percent = risk_percent
         self.running = False
         self.last_signal = 'Neutral'
         self.last_trade_time = None
-        self.cooldown_seconds = 900  # 15 minutes cooldown
+        self.cooldown_seconds = 600 if 'XRP' in symbol else 0  # 10 دقیقه برای XRP
         self.exchange = ccxt_async.bybit({
             'apiKey': BYBIT_LIVE_API_KEY,
             'secret': BYBIT_LIVE_API_SECRET,
@@ -138,8 +138,6 @@ class PersianCheetahScalper:
             indicators['Volume'] = df['volume']
             indicators['Volume_MA'] = ta.trend.SMAIndicator(df['volume'], window=20).sma_indicator()
             indicators['ATR'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
-            # Momentum filter: Price change over last 5 candles
-            indicators['Momentum'] = df['close'].pct_change(periods=5)
             return indicators
         except Exception as e:
             logger.error(f"{bcolors.FAIL}Error calculating indicators for {self.symbol}: {e}")
@@ -147,13 +145,19 @@ class PersianCheetahScalper:
 
     def calculate_position_size(self, price, stop_loss_price):
         risk_amount = self.wallet.balance * self.risk_percent  # 1 دلار
-        position_value = risk_amount * self.leverage  # 10 دلار (یا 5 دلار برای XRP)
+        position_value = risk_amount * self.leverage  # 20 دلار برای BTC، 10 دلار برای XRP
         quantity = position_value / price
         if not self.wallet.can_open_position(position_value, self.leverage):
             logger.warning(f"{bcolors.WARNING}Cannot open position on {self.symbol}: Margin limit exceeded")
             return 0
         try:
             quantity = float(self.exchange.amount_to_precision(self.symbol, quantity))
+            # Double-check position value
+            actual_value = quantity * price
+            if abs(actual_value - position_value) > 0.1:
+                logger.warning(f"{bcolors.WARNING}Adjusting quantity for {self.symbol}: Actual Value={actual_value:.2f}, Expected={position_value:.2f}")
+                quantity = position_value / price
+                quantity = float(self.exchange.amount_to_precision(self.symbol, quantity))
         except Exception as e:
             logger.error(f"{bcolors.FAIL}Error adjusting quantity precision: {e}")
             quantity = round(quantity, 4)
@@ -224,9 +228,9 @@ class PersianCheetahScalper:
             stop_loss = pos['stop_loss']
             take_profit = pos['take_profit']
             side = pos['side']
-            # Close position if open for more than 1 hour
+            # Close position if open for more than 30 minutes
             pos_time = datetime.datetime.fromisoformat(pos['timestamp'])
-            if (datetime.datetime.now() - pos_time).total_seconds() > 3600:
+            if (datetime.datetime.now() - pos_time).total_seconds() > 1800:
                 self.close_position(pos, current_price, reason='Position timeout')
                 continue
             if side == 'Long':
@@ -273,8 +277,8 @@ class PersianCheetahScalper:
         logger.info(f"{bcolors.OKBLUE}PersianCheetah_Scalper_Bybit started for {self.symbol} (1m, Paper Trading)")
         while self.running:
             try:
-                # Check cooldown
-                if self.last_trade_time and (datetime.datetime.now() - self.last_trade_time).total_seconds() < self.cooldown_seconds:
+                # Cooldown فقط برای XRP
+                if self.last_trade_time and self.cooldown_seconds > 0 and (datetime.datetime.now() - self.last_trade_time).total_seconds() < self.cooldown_seconds:
                     await asyncio.sleep(10)
                     continue
 
@@ -298,27 +302,24 @@ class PersianCheetahScalper:
                 volume = indicators['Volume'].iloc[-1]
                 volume_ma = indicators['Volume_MA'].iloc[-1]
                 atr = indicators['ATR'].iloc[-1]
-                momentum = indicators['Momentum'].iloc[-1]
 
                 atr_threshold = price * 0.0005
-                # Stricter RSI for ETHUSDT
-                rsi_long = 35 if self.symbol == 'ETHUSDT' else 40
-                rsi_short = 65 if self.symbol == 'ETHUSDT' else 60
-                logger.info(f"{bcolors.OKCYAN}{self.symbol} - RSI: {rsi:.2f}, BB Upper: {bb_upper:.4f}, BB Middle: {bb_middle:.4f}, BB Lower: {bb_lower:.4f}, Volume: {volume:.2f}, ATR: {atr:.4f}, Momentum: {momentum:.4f}, Wallet Balance: {self.wallet.balance:.2f}")
+                # RSI سخت‌تر برای XRP
+                rsi_long = 35 if self.symbol == 'XRPUSDT' else 40
+                rsi_short = 65 if self.symbol == 'XRPUSDT' else 60
+                logger.info(f"{bcolors.OKCYAN}{self.symbol} - RSI: {rsi:.2f}, BB Upper: {bb_upper:.4f}, BB Middle: {bb_middle:.4f}, BB Lower: {bb_lower:.4f}, Volume: {volume:.2f}, ATR: {atr:.4f}, Wallet Balance: {self.wallet.balance:.2f}")
 
                 long_conditions = {
                     f'RSI < {rsi_long}': rsi < rsi_long,
                     'Price <= BB Lower': price <= bb_lower,
                     'Volume > Volume MA': volume > volume_ma,
-                    'ATR > Threshold': atr > atr_threshold,
-                    'Momentum > 0': momentum > 0
+                    'ATR > Threshold': atr > atr_threshold
                 }
                 short_conditions = {
                     f'RSI > {rsi_short}': rsi > rsi_short,
                     'Price >= BB Upper': price >= bb_upper,
                     'Volume > Volume MA': volume > volume_ma,
-                    'ATR > Threshold': atr > atr_threshold,
-                    'Momentum < 0': momentum < 0
+                    'ATR > Threshold': atr > atr_threshold
                 }
                 logger.info(f"{bcolors.OKCYAN}Long Conditions for {self.symbol}: {long_conditions}")
                 logger.info(f"{bcolors.OKCYAN}Short Conditions for {self.symbol}: {short_conditions}")
@@ -370,7 +371,7 @@ class PersianCheetahScalper:
                         'first_target_hit': False
                     }
                     self.wallet.positions.append(position)
-                    self.last_trade_time = datetime.datetime.now()
+                    self.last_trade_time = datetime.datetime.now() if self.cooldown_seconds > 0 else None
                     logger.info(f"{bcolors.OKBLUE}Opened {signal} on {self.symbol}: Qty: {quantity:.4f}, SL: {stop_loss:.4f}, TP: {take_profit:.4f}")
 
                     await telegram_bot.send_message(
@@ -487,7 +488,7 @@ async def main():
     global manager
     try:
         manager = BotManager()
-        trading_pairs = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT']
+        trading_pairs = ['BTCUSDT', 'XRPUSDT']
         for symbol in trading_pairs:
             manager.add_bot(symbol=symbol, timeframe='1m')
             logger.info(f"{bcolors.OKGREEN}Added bot for {symbol}")
@@ -495,7 +496,7 @@ async def main():
         await asyncio.gather(*tasks)
         await telegram_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text="PersianCheetah_Scalper_Bybit initialized for BTC, ETH, XRP (1m, Paper Trading, Futures)"
+            text="PersianCheetah_Scalper_Bybit initialized for BTC, XRP (1m, Paper Trading, Futures)"
         )
     except Exception as e:
         logger.error(f"{bcolors.FAIL}Fatal error in PersianCheetah_Scalper_Bybit: {e}")

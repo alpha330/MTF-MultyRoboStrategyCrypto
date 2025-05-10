@@ -5,7 +5,23 @@ import logging
 import time
 from datetime import datetime, timezone, timedelta
 import os
+import telegram
+from telegram.ext import Application, CommandHandler
+import asyncio
+import uuid
 from dotenv import load_dotenv
+
+# Define color codes for logs
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
 # تنظیم لاگ
 logging.basicConfig(
@@ -20,8 +36,20 @@ logger = logging.getLogger(__name__)
 
 # لود متغیرهای محیطی (API Key و Secret)
 load_dotenv()
-API_KEY = os.getenv('BYBIT_TESTNET_API_KEY')
-API_SECRET = os.getenv('BYBIT_TESTNET_API_SECRET')
+API_KEY = os.getenv('BYBIT_LIVE_API_KEY')
+API_SECRET = os.getenv('BYBIT_LIVE_API_SECRET')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN_LIVE_PERSIAN_CHEETAH')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHANAL_ID_PCHEETAH')
+
+# Validate Telegram environment variables
+if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
+    raise ValueError("Missing Telegram environment variables in .env file")
+
+try:
+    telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
+except Exception as e:
+    logger.error(f"{bcolors.FAIL}Error initializing Telegram bot: {e}")
+    raise
 
 def get_utc_timestamp():
     utc_now = datetime.now(timezone.utc)
