@@ -343,7 +343,7 @@ class TradingBot:
                 if signal:
                     balance = self.exchange.fetch_balance(params={'recv_window': 60000})['USDT']['free']
                     logger.info(f"{bcolors.OKBLUE}Current Balance Before Opening Positions: {balance:.2f} USDT")
-                    if balance < 10:  # Minimum balance check
+                    if balance < 0:  # Minimum balance check
                         logger.error(f"{bcolors.FAIL}Balance {balance:.2f} USDT is too low to open a position")
                         if self.loop:
                             asyncio.run_coroutine_threadsafe(
