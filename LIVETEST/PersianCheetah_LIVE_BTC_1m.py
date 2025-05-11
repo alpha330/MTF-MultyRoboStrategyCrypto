@@ -1,545 +1,290 @@
-import ccxt
 import pandas as pd
 import ta
 import logging
-import threading
-from time import sleep
-from dotenv import load_dotenv
-import os
-import datetime
-import telegram
-from telegram.ext import Application, CommandHandler
-import asyncio
+import numpy as np
+from datetime import datetime
 
-# Define color codes for logs
-class bcolors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-
-# Configure logging
+# تنظیم لاگ
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/root/MTF-MultyRoboStrategyCrypto/LIVE/PersianCheetah_LIVE_BTC_1m.log'),
+        logging.FileHandler('backtest_log_persian_cheetah_optimized_1m.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
-API_KEY = os.getenv('BYBIT_LIVE_API_KEY')
-API_SECRET = os.getenv('BYBIT_LIVE_API_SECRET')
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN_LIVE_PERSIAN_CHEETAH')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHANAL_ID_PCHEETAH')
-
-# Validate environment variables
-if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
-    raise ValueError("Missing required environment variables in .env file")
-
-# Initialize Telegram bot
-try:
-    telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
-except Exception as e:
-    logger.error(f"{bcolors.FAIL}Error initializing Telegram bot: {e}")
-    raise
-
-def get_utc_timestamp():
-    utc_now = datetime.datetime.now(datetime.timezone.utc)
-    return int(utc_now.timestamp() * 1000)
-
-class TradingBot:
-    def __init__(self, symbol, timeframe, indicators, leverage=5, risk_percent=0.05, loop=None):
-        self.symbol = symbol
-        self.timeframe = timeframe
-        self.indicators = indicators
+class BacktestPersianCheetahOptimized:
+    def __init__(self, initial_balance=100, leverage=15, risk_percent=1, fee_rate=0.0002, symbol='BTCUSDT'):
+        self.initial_balance = initial_balance
+        self.balance = initial_balance
         self.leverage = leverage
         self.risk_percent = risk_percent
-        self.running = False
-        self.last_signal = 'Neutral'
-        self.loop = loop  # Asyncio event loop from BotManager
-        self.exchange = ccxt.bybit({
-            'apiKey': API_KEY,
-            'secret': API_SECRET,
-            'enableRateLimit': True,
-        })
-        self.exchange.nonce = get_utc_timestamp
-        self.exchange.set_position_mode(hedged=True)
-        self.exchange.load_markets()
-        if self.symbol not in self.exchange.markets:
-            logger.error(f"{bcolors.FAIL}Symbol {self.symbol} Not Exists")
-            raise ValueError(f"{bcolors.FAIL}Symbol {self.symbol} Not Exists")
-        self._set_leverage()
-        self.telegram_bot = telegram_bot
+        self.fee_rate = fee_rate
+        self.btc_held = 0
+        self.trades = []
+        self.position = None
+        self.positions = []
+        self.equity_history = []
+        self.symbol = symbol
+        self.trailing_stop_percent = 0.015  # 1.5% برای Trailing Stop
+        self.last_trade_time = None
+        self.min_trade_interval = pd.Timedelta(minutes=5)
 
-    async def async_send_telegram_message(self, chat_id, text):
+        # لود داده‌ها
         try:
-            await self.telegram_bot.send_message(chat_id=chat_id, text=text)
-            logger.info(f"{bcolors.OKGREEN}Telegram message sent: {text}")
+            self.df_1m = pd.read_csv('./BTCUSDT_1m_historical.csv')
+            self.df_1m['timestamp'] = pd.to_datetime(self.df_1m['timestamp'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+            self.df_1m = self.df_1m.dropna(subset=['timestamp'])
+            if self.df_1m.empty or 'close' not in self.df_1m.columns:
+                logger.error("Dataframe 1m is empty or missing 'close' column")
+                raise ValueError("Invalid 1m data: empty or missing 'close' column")
+            logger.info(f"Loaded 1m data: {len(self.df_1m)} rows, columns: {self.df_1m.columns.tolist()}")
         except Exception as e:
-            logger.error(f"{bcolors.FAIL}Error sending Telegram message: {e}")
+            logger.error(f"Error loading data: {e}")
+            raise
 
-    def _set_leverage(self):
-        try:
-            positions = self.exchange.fetch_positions([self.symbol], params={'category': 'linear'})
-            for pos in positions:
-                current_leverage = float(pos['info']['leverage'])
-                position_idx = int(pos['info']['positionIdx'])
-                if current_leverage != self.leverage:
-                    response = self.exchange.set_leverage(
-                        self.leverage,
-                        self.symbol,
-                        params={
-                            'category': 'linear',
-                            'positionIdx': position_idx,
-                            'recv_window': 60000
-                        }
-                    )
-                    logger.info(f"{bcolors.OKCYAN}LEVERAGE {self.leverage}x SET FOR {self.symbol} POSITIONIDX {position_idx}: {response}")
-                else:
-                    logger.info(f"{bcolors.OKCYAN}LEVERAGE {self.leverage}x ALREADY SET FOR {self.symbol} POSITIONIDX {position_idx}")
-        except Exception as e:
-            logger.error(f"{bcolors.FAIL}EXCEPTION DURING SET LEVERAGE: {e}")
-            if self.loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.async_send_telegram_message(TELEGRAM_CHAT_ID, f"Error setting leverage for {self.symbol}: {e}"),
-                    self.loop
-                )
-
-    def fetch_ohlcv(self, timeframe):
-        for _ in range(3):
-            try:
-                ohlcv = self.exchange.fetch_ohlcv(self.symbol, timeframe, limit=400)
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                logger.info(f"{bcolors.OKGREEN}FOR OHLCV DATA {self.symbol} IN {timeframe} CANDLES ARE GET: {len(df)}")
-                if len(df) < 50:
-                    logger.warning(f"{bcolors.WARNING}CANDLES ({len(df)}) FOR {self.symbol} IN {timeframe} NOT ENOUGH")
-                    return None
-                return df
-            except Exception as e:
-                logger.error(f"{bcolors.FAIL}EXCEPTION DURING GETTING DATA CANDLE {self.symbol} IN {timeframe}: {str(e)}")
-                sleep(5)
-        logger.error(f"{bcolors.FAIL}CANNOT GET DATA CANDLES {self.symbol} AFTER 3 TIMES TRY")
-        return None
+        # محاسبه HODL
+        self.hodl_btc = initial_balance / self.df_1m['close'].iloc[0]
+        self.hodl_value = 0
 
     def calculate_indicators(self, df):
-        indicators_data = {}
-        for indicator in self.indicators:
-            if indicator == 'RSI':
-                indicators_data['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-            elif indicator == 'Bollinger':
-                bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=1.2)
-                indicators_data['BB_upper'] = bb.bollinger_hband()
-                indicators_data['BB_middle'] = bb.bollinger_mavg()
-                indicators_data['BB_lower'] = bb.bollinger_lband()
-            elif indicator == 'Volume':
-                indicators_data['Volume'] = df['volume']
-                indicators_data['Volume_MA'] = ta.trend.SMAIndicator(df['volume'], window=20).sma_indicator()
-            elif indicator == 'ATR':
-                indicators_data['ATR'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
-        return indicators_data
+        indicators = {}
+        try:
+            indicators['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+            bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+            indicators['BB_upper'] = bb.bollinger_hband()
+            indicators['BB_middle'] = bb.bollinger_mavg()
+            indicators['BB_lower'] = bb.bollinger_lband()
+            indicators['Volume'] = df['volume']
+            indicators['Volume_MA'] = ta.trend.SMAIndicator(df['volume'], window=20).sma_indicator()
+            indicators['ATR'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
+            indicators['EMA_50'] = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
+            return indicators
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {e}")
+            return None
 
-    def calculate_position_size(self, balance, price, stop_loss_percent=0.005):
-        risk_amount = balance * self.risk_percent
-        stop_loss_distance = price * stop_loss_percent
-        if stop_loss_distance == 0:
-            logger.error(f"{bcolors.WARNING}Stop Loss distance is zero, cannot calculate position size")
+    def calculate_position_size(self, price, atr):
+        risk_amount = self.balance * self.risk_percent
+        stop_loss_distance = 1.5 * atr  # استاپ‌لاس ۱.۵ برابر ATR
+        position_value = risk_amount * self.leverage
+        quantity = position_value / price
+        if quantity <= 0:
+            logger.warning(f"Invalid quantity: {quantity}")
             return 0
-        quantity = risk_amount / stop_loss_distance
-        min_quantity = 0.001  # Bybit minimum order size for BTC/USDT
-        if quantity < min_quantity:
-            logger.warning(f"{bcolors.WARNING}Calculated quantity {quantity} is below minimum {min_quantity}, adjusting to minimum")
-            quantity = min_quantity
-        # Check if margin requirement is met
-        margin_required = (quantity * price) / self.leverage
-        if margin_required > balance:
-            logger.warning(f"{bcolors.WARNING}Margin required {margin_required:.2f} exceeds balance {balance:.2f}, adjusting quantity")
-            quantity = (balance * self.leverage) / price
-            quantity = max(min_quantity, quantity)
-        logger.info(f"{bcolors.OKCYAN}Calculated position size: {quantity:.6f} BTC, Margin required: {margin_required:.2f} USDT")
         return quantity
 
-    def get_open_position(self, side=None):
+    def close_position(self, position, exit_price, reason='Manual'):
         try:
-            positions = self.exchange.fetch_positions([self.symbol], params={'category': 'linear'})
-            logger.info(f"{bcolors.OKCYAN}Fetched Positions: {positions}")
-            for pos in positions:
-                if pos['symbol'] == self.symbol and pos['contracts'] > 0:
-                    if side is None or (side == 'buy' and pos['side'] == 'buy') or (side == 'sell' and pos['side'] == 'sell'):
-                        pos['trailing_stop'] = pos.get('trailing_stop', pos['stopLoss'])
-                        pos['first_target_hit'] = pos.get('first_target_hit', False)
-                        pos['entryTime'] = pos.get('timestamp', get_utc_timestamp())
-                        return pos
-            return None
+            quantity = position['quantity']
+            entry_price = position['entry_price']
+            side = position['side']
+            if side == 'Long':
+                pnl = (exit_price - entry_price) * quantity
+            else:
+                pnl = (entry_price - exit_price) * quantity
+            entry_fee = entry_price * quantity * self.fee_rate
+            exit_fee = exit_price * quantity * self.fee_rate
+            total_pnl = pnl - entry_fee - exit_fee
+            self.balance += total_pnl
+            status = 'Win' if total_pnl > 0 else 'Loss'
+            trade_record = {
+                'type': side,
+                'profit': total_pnl,
+                'entry_price': entry_price,
+                'exit_price': exit_price,
+                'reason': reason
+            }
+            self.trades.append(trade_record)
+            self.positions.remove(position)
+            logger.info(f"Closed {side} at {exit_price}, PnL: {total_pnl:.2f}, Reason: {reason}, Balance: {self.balance:.2f}")
         except Exception as e:
-            logger.error(f"{bcolors.FAIL}EXCEPTION DURING GETTING DATA POSITIONS: {e}")
-            if self.loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.async_send_telegram_message(TELEGRAM_CHAT_ID, f"Error fetching positions on {self.symbol}: {e}"),
-                    self.loop
-                )
-            return None
+            logger.error(f"Error closing position: {e}")
 
-    def close_position(self, position, exit_price=None, reason='Manual'):
-        try:
-            quantity = position['contracts']
-            side = 'sell' if position['side'] == 'buy' else 'buy'
-            exit_price = exit_price or self.exchange.fetch_ticker(self.symbol)['last']
-            order = self.exchange.create_market_order(
-                self.symbol,
-                side,
-                quantity,
-                params={
-                    'category': 'linear',
-                    'reduceOnly': True,
-                    'positionIdx': 1 if position['side'] == 'buy' else 2
-                }
-            )
-            logger.info(f"{bcolors.OKGREEN}POSITION CLOSED: {order}")
-            if self.loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.async_send_telegram_message(
-                        TELEGRAM_CHAT_ID,
-                        f"Position closed on {self.symbol}\nSide: {position['side']}\nQty: {quantity:.4f}\nReason: {reason}\nPrice: {exit_price:.2f}"
-                    ),
-                    self.loop
-                )
-        except Exception as e:
-            logger.error(f"{bcolors.FAIL}EXCEPTION DURING CLOSE POSITION: {e}")
-            if self.loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.async_send_telegram_message(
-                        TELEGRAM_CHAT_ID,
-                        f"Error closing position on {self.symbol}: {e}"
-                    ),
-                    self.loop
-                )
-
-    def update_trailing_stop(self, position, current_price, bb_middle):
-        trailing_stop_percent = 0.005
-        trailing_profit_percent = 0.005
-        if position['side'] == 'buy':
-            if current_price >= position['takeProfit']:
-                position['takeProfit'] = current_price * (1 + trailing_profit_percent)
-                position['stopLoss'] = max(position['stopLoss'], current_price * (1 - trailing_stop_percent))
-                position['first_target_hit'] = True
-            if position.get('first_target_hit', False):
-                position['trailing_stop'] = max(position['trailing_stop'], current_price * (1 - trailing_stop_percent))
-                if current_price <= position['trailing_stop']:
-                    self.close_position(position, position['trailing_stop'], reason='Trailing Stop Hit')
-        else:
-            if current_price <= position['takeProfit']:
-                position['takeProfit'] = current_price * (1 - trailing_profit_percent)
-                position['stopLoss'] = min(position['stopLoss'], current_price * (1 + trailing_stop_percent))
-                position['first_target_hit'] = True
-            if position.get('first_target_hit', False):
-                position['trailing_stop'] = min(position['trailing_stop'], current_price * (1 + trailing_stop_percent))
-                if current_price >= position['trailing_stop']:
-                    self.close_position(position, position['trailing_stop'], reason='Trailing Stop Hit')
-
-    def run(self):
-        self.running = True
-        logger.info(f"{bcolors.OKBLUE}ALGOBOT {self.symbol} IN TIME FRAME {self.timeframe} HAS BEEN STARTED")
-        if self.loop:
-            asyncio.run_coroutine_threadsafe(
-                self.async_send_telegram_message(
-                    TELEGRAM_CHAT_ID,
-                    f"ALGOBOT started for {self.symbol} ({self.timeframe})"
-                ),
-                self.loop
-            )
-        while self.running:
-            try:
-                df = self.fetch_ohlcv(self.timeframe)
-                if df is None or df.empty:
-                    logger.warning(f"{bcolors.WARNING}DATA OHLCV FOR {self.symbol} IN {self.timeframe} NOT VALID")
-                    sleep(60)
+    def check_tp_sl_trailing(self, current_price, atr, index):
+        for pos in self.positions[:]:
+            stop_loss = pos['stop_loss']
+            take_profit = pos['take_profit']
+            side = pos['side']
+            if side == 'Long':
+                if current_price <= stop_loss:
+                    self.close_position(pos, stop_loss, reason='Stop Loss Hit')
                     continue
-
-                indicators_data = self.calculate_indicators(df)
-                price = df['close'].iloc[-1]
-
-                rsi = indicators_data.get('RSI')
-                bb_upper = indicators_data.get('BB_upper')
-                bb_middle = indicators_data.get('BB_middle')
-                bb_lower = indicators_data.get('BB_lower')
-                volume = indicators_data.get('Volume')
-                volume_ma = indicators_data.get('Volume_MA')
-                atr = indicators_data.get('ATR')
-
-                if any(x is None for x in [rsi, bb_upper, bb_middle, bb_lower, volume, volume_ma, atr]):
-                    logger.warning(f"{bcolors.WARNING}Indicators for {self.symbol} Not Calculated")
-                    sleep(60)
+                if current_price >= take_profit:
+                    pos['take_profit'] = current_price + 3 * atr
+                    pos['stop_loss'] = max(pos['stop_loss'], current_price - 1.5 * atr)
+                    pos['first_target_hit'] = True
+                if pos.get('first_target_hit', False):
+                    pos['trailing_stop'] = max(pos['trailing_stop'], current_price - 1.5 * atr)
+                    if current_price <= pos['trailing_stop']:
+                        self.close_position(pos, pos['trailing_stop'], reason='Trailing Stop Hit')
+            else:
+                if current_price >= stop_loss:
+                    self.close_position(pos, stop_loss, reason='Stop Loss Hit')
                     continue
+                if current_price <= take_profit:
+                    pos['take_profit'] = current_price - 3 * atr
+                    pos['stop_loss'] = min(pos['stop_loss'], current_price + 1.5 * atr)
+                    pos['first_target_hit'] = True
+                if pos.get('first_target_hit', False):
+                    pos['trailing_stop'] = min(pos['trailing_stop'], current_price + 1.5 * atr)
+                    if current_price >= pos['trailing_stop']:
+                        self.close_position(pos, pos['trailing_stop'], reason='Trailing Stop Hit')
 
-                rsi = rsi.iloc[-1]
-                bb_upper = bb_upper.iloc[-1]
-                bb_middle = bb_middle.iloc[-1]
-                bb_lower = bb_lower.iloc[-1]
-                volume = volume.iloc[-1]
-                volume_ma = volume_ma.iloc[-1]
-                atr = atr.iloc[-1]
+    def calculate_metrics(self):
+        if not self.trades:
+            return {
+                'total_trades': 0,
+                'win_rate': 0.0,
+                'max_drawdown': 0.0,
+                'sharpe_ratio': 0.0,
+                'profit_factor': 0.0
+            }
+        total_trades = len(self.trades)
+        wins = sum(1 for trade in self.trades if trade['profit'] > 0)
+        win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0.0
+        equity_series = pd.Series(self.equity_history)
+        rolling_max = equity_series.cummax()
+        drawdowns = (rolling_max - equity_series) / rolling_max
+        max_drawdown = drawdowns.max() * 100 if not drawdowns.empty else 0.0
+        returns = pd.Series([trade['profit'] / self.initial_balance for trade in self.trades])
+        sharpe_ratio = (returns.mean() / returns.std()) * np.sqrt(365 * 24 * 60) if returns.std() != 0 else 0.0
+        gross_profit = sum(trade['profit'] for trade in self.trades if trade['profit'] > 0)
+        gross_loss = abs(sum(trade['profit'] for trade in self.trades if trade['profit'] < 0))
+        profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
+        return {
+            'total_trades': total_trades,
+            'win_rate': win_rate,
+            'max_drawdown': max_drawdown,
+            'sharpe_ratio': sharpe_ratio,
+            'profit_factor': profit_factor
+        }
 
-                atr_threshold = price * 0.0003
-                rsi_long = 45
-                rsi_short = 55
-                logger.info(f"{bcolors.OKCYAN}{self.symbol} - RSI: {rsi:.2f}, BB Upper: {bb_upper:.4f}, BB Middle: {bb_middle:.4f}, BB Lower: {bb_lower:.4f}, Volume: {volume:.2f}, ATR: {atr:.4f}")
+    def run_backtest(self):
+        logger.info("Starting optimized backtest for PersianCheetah strategy on 1m timeframe...")
+        indicators = self.calculate_indicators(self.df_1m)
+        if indicators is None:
+            logger.error("Failed to calculate indicators")
+            return
 
-                long_position = self.get_open_position(side='buy')
-                short_position = self.get_open_position(side='sell')
+        min_data_length = 50
+        for index, row in self.df_1m.iterrows():
+            if index < min_data_length - 1:
+                continue
+            current_price = row['close']
+            current_volume = row['volume']
+            timestamp = row['timestamp']
 
-                # Position timeout (30 minutes)
-                def check_position_timeout(position):
-                    if position:
-                        pos_time = datetime.datetime.fromtimestamp(position['entryTime'] / 1000.0)
-                        if (datetime.datetime.now() - pos_time).total_seconds() > 1800:
-                            self.close_position(position, price, reason='Position timeout')
+            # بررسی فاصله زمانی از آخرین معامله
+            if self.last_trade_time and (timestamp - self.last_trade_time) < self.min_trade_interval:
+                continue
 
-                if long_position:
-                    check_position_timeout(long_position)
-                    if rsi > rsi_short:
-                        self.close_position(long_position, price, reason=f'RSI above {rsi_short}')
-                    else:
-                        self.update_trailing_stop(long_position, price, bb_middle)
+            # محاسبه equity
+            unrealized_pnl = 0
+            for pos in self.positions:
+                if pos['side'] == 'Long':
+                    unrealized_pnl += (current_price - pos['entry_price']) * pos['quantity'] * self.leverage
+                else:
+                    unrealized_pnl += (pos['entry_price'] - current_price) * pos['quantity'] * self.leverage
+            current_equity = self.balance + unrealized_pnl
+            self.equity_history.append(current_equity)
 
-                if short_position:
-                    check_position_timeout(short_position)
-                    if rsi < rsi_long:
-                        self.close_position(short_position, price, reason=f'RSI below {rsi_long}')
-                    else:
-                        self.update_trailing_stop(short_position, price, bb_middle)
+            rsi = indicators['RSI'].iloc[index]
+            bb_upper = indicators['BB_upper'].iloc[index]
+            bb_middle = indicators['BB_middle'].iloc[index]
+            bb_lower = indicators['BB_lower'].iloc[index]
+            volume = indicators['Volume'].iloc[index]
+            volume_ma = indicators['Volume_MA'].iloc[index]
+            atr = indicators['ATR'].iloc[index]
+            ema_50 = indicators['EMA_50'].iloc[index]
 
-                long_conditions = {
-                    f'RSI < {rsi_long}': rsi < rsi_long,
-                    'Price <= BB Lower': price <= bb_lower,
-                    'Volume > 0.8 * Volume MA': volume > 0.8 * volume_ma,
-                    'ATR > Threshold': atr > atr_threshold
+            atr_threshold = current_price * 0.0005
+            rsi_long = 30
+            rsi_short = 70
+            rsi_neutral_low = 45
+            rsi_neutral_high = 55
+
+            long_conditions = {
+                f'RSI < {rsi_long}': rsi < rsi_long,
+                'Price <= BB Lower': current_price <= bb_lower,
+                'Price - BB Lower > ATR': (bb_lower - current_price) >= atr,
+                'Volume > Volume MA': volume > volume_ma,
+                'ATR > Threshold': atr > atr_threshold,
+                'Price > EMA 50': current_price > ema_50
+            }
+            short_conditions = {
+                f'RSI > {rsi_short}': rsi > rsi_short,
+                'Price >= BB Upper': current_price >= bb_upper,
+                'Price - BB Upper > ATR': (current_price - bb_upper) >= atr,
+                'Volume > Volume MA': volume > volume_ma,
+                'ATR > Threshold': atr > atr_threshold,
+                'Price < EMA 50': current_price < ema_50
+            }
+
+            self.check_tp_sl_trailing(current_price, atr, index)
+
+            long_position = next((p for p in self.positions if p['side'] == 'Long'), None)
+            short_position = next((p for p in self.positions if p['side'] == 'Short'), None)
+
+            # خروج در منطقه خنثی RSI
+            if long_position and rsi >= rsi_neutral_high:
+                self.close_position(long_position, current_price, reason=f'RSI in neutral zone ({rsi_neutral_high})')
+                continue
+            if short_position and rsi <= rsi_neutral_low:
+                self.close_position(short_position, current_price, reason=f'RSI in neutral zone ({rsi_neutral_low})')
+                continue
+
+            signal = None
+            if all(long_conditions.values()):
+                signal = 'Long'
+            elif all(short_conditions.values()):
+                signal = 'Short'
+
+            if signal and not long_position and not short_position:
+                if self.balance <= 0:
+                    logger.warning("Balance is zero or negative, cannot open new position.")
+                    break
+                stop_loss = current_price - (1.5 * atr) if signal == 'Long' else current_price + (1.5 * atr)
+                take_profit = current_price + (3 * atr) if signal == 'Long' else current_price - (3 * atr)
+                quantity = self.calculate_position_size(current_price, atr)
+                if quantity == 0:
+                    logger.warning("Cannot open position: Zero quantity")
+                    continue
+                position = {
+                    'side': signal,
+                    'quantity': quantity,
+                    'entry_price': current_price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'trailing_stop': stop_loss,
+                    'timestamp': timestamp,
+                    'first_target_hit': False
                 }
-                short_conditions = {
-                    f'RSI > {rsi_short}': rsi > rsi_short,
-                    'Price >= BB Upper': price >= bb_upper,
-                    'Volume > 0.8 * Volume MA': volume > 0.8 * volume_ma,
-                    'ATR > Threshold': atr > atr_threshold
-                }
+                self.positions.append(position)
+                fee = self.fee_rate * (quantity * current_price)
+                self.balance -= fee
+                self.last_trade_time = timestamp
+                logger.info(f"Opened {signal} at {current_price}, Qty: {quantity:.4f}, SL: {stop_loss:.4f}, TP: {take_profit:.4f}, Fee: {fee:.4f}, Balance: {self.balance:.2f}")
 
-                logger.info(f"{bcolors.OKCYAN}Long Conditions: {long_conditions}")
-                logger.info(f"{bcolors.OKCYAN}Short Conditions: {short_conditions}")
+        # محاسبه ارزش نهایی HODL
+        initial_price = self.df_1m['close'].iloc[0]
+        final_price = self.df_1m['close'].iloc[-1]
+        self.hodl_value = (self.initial_balance / initial_price) * final_price
 
-                signal = None
-                if all(long_conditions.values()):
-                    signal = 'Long'
-                elif all(short_conditions.values()):
-                    signal = 'Short'
-
-                if signal:
-                    balance = self.exchange.fetch_balance(params={'recv_window': 60000})['USDT']['free']
-                    logger.info(f"{bcolors.OKBLUE}Current Balance Before Opening Positions: {balance:.2f} USDT")
-                    if balance < 0:  # Minimum balance check
-                        logger.error(f"{bcolors.FAIL}Balance {balance:.2f} USDT is too low to open a position")
-                        if self.loop:
-                            asyncio.run_coroutine_threadsafe(
-                                self.async_send_telegram_message(
-                                    TELEGRAM_CHAT_ID,
-                                    f"Cannot open position on {self.symbol}: Balance {balance:.2f} USDT is too low"
-                                ),
-                                self.loop
-                            )
-                        sleep(60)
-                        continue
-
-                    stop_loss = price * (1 - 0.005) if signal == 'Long' else price * (1 + 0.005)
-                    take_profit = price * (1 + 0.01) if signal == 'Long' else price * (1 - 0.01)
-                    quantity = self.calculate_position_size(balance, price, stop_loss_percent=0.005)
-
-                    if quantity == 0:
-                        logger.warning(f"{bcolors.WARNING}Cannot Open Positions Because Of Zero Margin")
-                        sleep(60)
-                        continue
-
-                    try:
-                        params = {
-                            'category': 'linear',
-                            'stopLoss': round(stop_loss, 4),
-                            'takeProfit': round(take_profit, 4),
-                            'positionIdx': 1 if signal == 'Long' else 2
-                        }
-                        if signal == 'Long':
-                            order = self.exchange.create_market_buy_order(self.symbol, quantity, params)
-                        else:
-                            order = self.exchange.create_market_sell_order(self.symbol, quantity, params)
-                        sleep(15)
-                        position = self.get_open_position(side='buy' if signal == 'Long' else 'sell')
-                        if position:
-                            logger.info(f"{bcolors.OKBLUE}Active Position: {position}")
-                            if self.loop:
-                                asyncio.run_coroutine_threadsafe(
-                                    self.async_send_telegram_message(
-                                        TELEGRAM_CHAT_ID,
-                                        f"New {signal} on {self.symbol}\nQty: {quantity:.4f}\nLeverage: {self.leverage}x\nEntry: {price:.2f}\nSL: {stop_loss:.2f}\nTP: {take_profit:.2f}\nBalance: {balance:.2f} USDT"
-                                    ),
-                                    self.loop
-                                )
-                        else:
-                            logger.warning(f"{bcolors.WARNING}Opened Position Not Found after 15 seconds")
-                            if self.loop:
-                                asyncio.run_coroutine_threadsafe(
-                                    self.async_send_telegram_message(
-                                        TELEGRAM_CHAT_ID,
-                                        f"Warning: Opened position not found after 15 seconds on {self.symbol}"
-                                    ),
-                                    self.loop
-                                )
-                    except Exception as e:
-                        logger.error(f"{bcolors.FAIL}Exception During Opening Position: {e}")
-                        if self.loop:
-                            asyncio.run_coroutine_threadsafe(
-                                self.async_send_telegram_message(
-                                    TELEGRAM_CHAT_ID,
-                                    f"Error opening position on {self.symbol}: {e}"
-                                ),
-                                self.loop
-                            )
-
-                sleep(60)
-
-            except Exception as e:
-                logger.error(f"{bcolors.FAIL}General Exception In ALGOBOT {self.symbol}: {e}")
-                if self.loop:
-                    asyncio.run_coroutine_threadsafe(
-                        self.async_send_telegram_message(
-                            TELEGRAM_CHAT_ID,
-                            f"Error in ALGOBOT {self.symbol}: {e}"
-                        ),
-                        self.loop
-                    )
-                sleep(60)
-
-    def stop(self):
-        self.running = False
-        logger.info(f"{bcolors.OKCYAN}ALGOBOT {self.symbol} STOPPED")
-        if self.loop:
-            asyncio.run_coroutine_threadsafe(
-                self.async_send_telegram_message(
-                    TELEGRAM_CHAT_ID,
-                    f"ALGOBOT stopped for {self.symbol}"
-                ),
-                self.loop
-            )
-
-class BotManager:
-    def __init__(self):
-        self.bots = []
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.application = Application.builder().token(TELEGRAM_TOKEN).build()
-        self.application.add_handler(CommandHandler("start", self.start_telegram))
-        self.application.add_handler(CommandHandler("stop", self.stop_telegram))
-        self.application.add_handler(CommandHandler("status", self.status_telegram))
-        self.application.add_handler(CommandHandler("positions", self.positions_telegram))
-
-    def add_bot(self, symbol, timeframe, indicators):
-        bot = TradingBot(symbol, timeframe, indicators, loop=self.loop)
-        self.bots.append(bot)
-        return bot
-
-    def start_all(self):
-        for bot in self.bots:
-            threading.Thread(target=bot.run, daemon=True).start()
-        threading.Thread(target=self.run_telegram_bot, daemon=True).start()
-
-    def run_telegram_bot(self):
-        try:
-            self.loop.run_until_complete(self.application.initialize())
-            self.loop.run_until_complete(self.application.start())
-            self.loop.run_until_complete(self.application.updater.start_polling())
-            logger.info(f"{bcolors.OKGREEN}Telegram bot started")
-            self.loop.run_forever()
-        except Exception as e:
-            logger.error(f"{bcolors.FAIL}Error in Telegram bot loop: {e}")
-        finally:
-            self.loop.run_until_complete(self.application.updater.stop())
-            self.loop.run_until_complete(self.application.stop())
-            self.loop.run_until_complete(self.application.shutdown())
-            if not self.loop.is_closed():
-                self.loop.close()
-            logger.info(f"{bcolors.OKCYAN}Telegram bot stopped")
-
-    async def start_telegram(self, update, context):
-        for bot in self.bots:
-            bot.running = True
-            threading.Thread(target=bot.run, daemon=True).start()
-        await update.message.reply_text("ALGOBOT started")
-        logger.info(f"{bcolors.OKGREEN}ALGOBOT started via Telegram")
-        for bot in self.bots:
-            await bot.async_send_telegram_message(TELEGRAM_CHAT_ID, "ALGOBOT started")
-
-    async def stop_telegram(self, update, context):
-        for bot in self.bots:
-            bot.stop()
-        await update.message.reply_text("ALGOBOT stopped")
-        logger.info(f"{bcolors.WARNING}ALGOBOT stopped via Telegram")
-        for bot in self.bots:
-            await bot.async_send_telegram_message(TELEGRAM_CHAT_ID, "ALGOBOT stopped")
-
-    async def status_telegram(self, update, context):
-        for bot in self.bots:
-            df = bot.fetch_ohlcv(bot.timeframe)
-            indicators = bot.calculate_indicators(df) if df is not None else {}
-            long_position = bot.get_open_position(side='buy')
-            short_position = bot.get_open_position(side='sell')
-            balance = bot.exchange.fetch_balance(params={'recv_window': 60000})['USDT']['free']
-            status = f"ALGOBOT Status for {bot.symbol} ({bot.timeframe}):\n"
-            status += f"Running: {bot.running}\n"
-            status += f"Last Signal: {bot.last_signal}\n"
-            status += f"Balance: {balance:.2f} USDT\n"
-            status += f"RSI: {indicators.get('RSI', pd.Series([0])).iloc[-1]:.2f}\n"
-            status += f"BB Upper: {indicators.get('BB_upper', pd.Series([0])).iloc[-1]:.4f}\n"
-            status += f"BB Middle: {indicators.get('BB_middle', pd.Series([0])).iloc[-1]:.4f}\n"
-            status += f"BB Lower: {indicators.get('BB_lower', pd.Series([0])).iloc[-1]:.4f}\n"
-            status += f"ATR: {indicators.get('ATR', pd.Series([0])).iloc[-1]:.4f}\n"
-            status += f"Open Long: {'Yes' if long_position else 'No'}\n"
-            status += f"Open Short: {'Yes' if short_position else 'No'}\n"
-            await update.message.reply_text(status)
-        logger.info(f"{bcolors.OKCYAN}Status requested via Telegram")
-
-    async def positions_telegram(self, update, context):
-        stats = ""
-        for bot in self.bots:
-            positions = bot.exchange.fetch_positions([bot.symbol], params={'category': 'linear'})
-            open_positions = len([p for p in positions if p['contracts'] > 0])
-            stats += f"ALGOBOT Stats for {bot.symbol} ({bot.timeframe}):\n"
-            stats += f"Open Positions: {open_positions}\n\n"
-            for pos in positions:
-                if pos['contracts'] > 0:
-                    stats += f"Side: {pos['side']}, Size: {pos['contracts']:.4f}, Entry: {pos['entryPrice']:.2f}\n"
-            stats += "\n"
-            await update.message.reply_text(stats)
-        logger.info(f"{bcolors.OKCYAN}Positions stats requested via Telegram")
+        # گزارش معیارها
+        metrics = self.calculate_metrics()
+        logger.info("Backtest completed!")
+        logger.info(f"Initial Balance: {self.initial_balance:.2f} USDT")
+        logger.info(f"Final Balance (Strategy): {self.balance:.2f} USDT")
+        logger.info(f"Final Value (HODL): {self.hodl_value:.2f} USDT")
+        logger.info(f"Total Trades: {metrics['total_trades']}")
+        logger.info(f"Win Rate: {metrics['win_rate']:.2f}%")
+        logger.info(f"Maximum Drawdown: {metrics['max_drawdown']:.2f}%")
+        logger.info(f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}")
+        logger.info(f"Profit Factor: {metrics['profit_factor']:.2f}")
 
 if __name__ == "__main__":
-    manager = BotManager()
-
-    # Bot1: 1-minute timeframe for trading
-    bot1 = manager.add_bot(
-        symbol='BTC/USDT:USDT',
-        timeframe='1m',
-        indicators=['RSI', 'Bollinger', 'Volume', 'ATR']
-    )
-
-    manager.start_all()
-
-    try:
-        while True:
-            sleep(1)
-    except KeyboardInterrupt:
-        for bot in manager.bots:
-            bot.stop()
+    backtest = BacktestPersianCheetahOptimized(initial_balance=100, leverage=5, symbol='BTCUSDT')
+    backtest.run_backtest()
