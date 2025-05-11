@@ -7,7 +7,7 @@ from time import sleep
 exchange = ccxt.bybit({'enableRateLimit': True})
 
 # تایم‌فریم‌ها و مدت زمان
-timeframes = {"30m":"30m"}
+timeframes = {"1m":"1m"}
 symbol = 'BTC/USDT:USDT'
 days = 720  # ۶ ماه (۱۸۰ روز)
 
