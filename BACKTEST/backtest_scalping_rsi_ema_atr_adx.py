@@ -25,11 +25,11 @@ class BacktestScalpingHedging:
         self.positions = []
         self.equity_history = []
         self.symbol = symbol
-        self.risk_percent = 0.1  # ریسک ۱٪
+        self.risk_percent = 0.15  # ریسک ۱٪
         self.last_trade_time = None
-        self.min_trade_interval = pd.Timedelta(minutes=5)
+        self.min_trade_interval = pd.Timedelta(minutes=15)
         self.min_quantity = 0.0001  # حداقل مقدار پوزیشن
-        self.adjust_interval = 5  # تنظیم مارجین هر ۵ کندل
+        self.adjust_interval = 15  # تنظیم مارجین هر ۵ کندل
         self.candle_count = 0
 
         # لود داده‌ها
@@ -52,10 +52,10 @@ class BacktestScalpingHedging:
     def calculate_indicators(self, df):
         indicators = {}
         try:
-            indicators['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+            indicators['RSI'] = ta.momentum.RSIIndicator(df['close'], window=9).rsi()
             indicators['EMA9'] = ta.trend.EMAIndicator(df['close'], window=9).ema_indicator()
             indicators['EMA21'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
-            indicators['ATR'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
+            indicators['ATR'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=9).average_true_range()
             return indicators
         except Exception as e:
             logger.error(f"Error calculating indicators: {e}")
@@ -371,4 +371,3 @@ class BacktestScalpingHedging:
 if __name__ == "__main__":
     backtest = BacktestScalpingHedging(initial_balance=100, leverage=3, symbol='BTCUSDT')
     backtest.run_backtest()
-    backtest.plot_equity_comparison()

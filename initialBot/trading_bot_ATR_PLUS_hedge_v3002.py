@@ -109,6 +109,7 @@ class TradingBot:
         self.min_quantity = 0.0001
         self.candle_count = 0
         self.balance_log = []
+        self.initial_margin = None  # مقدار اولیه مارجین بعداً محاسبه می‌شه
         self.exchange = ccxt.bybit({
             'apiKey': API_KEY,
             'secret': API_SECRET,
@@ -141,7 +142,7 @@ class TradingBot:
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 logger.info(f"{bcolors.OKGREEN}OHLCV DATA FOR {self.symbol} IN {timeframe} FETCHED: {len(df)} CANDLES")
                 if len(df) < 50:
-                    logger.WARNING(f"{bcolors.WARNING}NOT ENOUGH CANDLES ({len(df)}) FOR {self.symbol} IN {timeframe}")
+                    logger.warning(f"{bcolors.WARNING}NOT ENOUGH CANDLES ({len(df)}) FOR {self.symbol} IN {timeframe}")
                     return None
                 return df
             except Exception as e:
@@ -230,7 +231,12 @@ class TradingBot:
             current_qty = float(position['contracts'])
             if abs(new_qty - current_qty) < 0.0001:
                 return
-            margin = (new_qty - current_qty) * price / self.leverage
+            # محاسبه مارجین بر اساس مقدار اولیه
+            if position['side'] == 'long':
+                initial_margin = self.initial_long_margin
+            else:
+                initial_margin = self.initial_short_margin
+            margin = (new_qty * price / self.leverage) - (current_qty * price / self.leverage)
             url = 'https://api-testnet.bybit.com/v5/position/add-margin'
             headers = {'X-BAPI-API-KEY': API_KEY}
             data = {
@@ -245,10 +251,46 @@ class TradingBot:
             response = requests.post(url, headers=headers, json=data)
             if response.status_code == 200:
                 logger.info(f"{bcolors.OKGREEN}ADJUSTED MARGIN FOR {position['side']}: NEW QTY {new_qty:.4f}")
+                sync_send_telegram_message(
+                    f"[{BRAND}] Adjusted margin for {position['side']} on {self.symbol}\nNew Quantity: {new_qty:.4f}"
+                )
             else:
                 logger.error(f"{bcolors.FAIL}FAILED TO ADJUST MARGIN: {response.text}")
         except Exception as e:
             logger.error(f"{bcolors.FAIL}ERROR ADJUSTING MARGIN: {e}")
+
+    def dynamic_margin_adjustment(self, long_position, short_position, price):
+        if long_position and short_position:
+            unrealized_pnl = float(long_position.get('unrealizedPnl', 0) or 0)
+            long_entry_price = float(long_position['entryPrice'])
+            long_qty = float(long_position['contracts'])
+            short_qty = float(short_position['contracts'])
+            long_stop = float(long_position.get('stopLossPrice', long_entry_price * 0.985))
+
+            # محاسبه درصد سود/ضرر لانگ
+            pnl_percentage = (unrealized_pnl / (long_entry_price * long_qty)) * 100  # درصد نسبت به مقدار پوزیشن
+
+            if unrealized_pnl < 0:  # لانگ منفی
+                margin_increase = abs(pnl_percentage) * 0.01  # گام 1% بر اساس درصد ضرر
+                new_short_qty = short_qty * (1 + margin_increase)
+                new_short_qty = max(self.min_quantity, float(self.exchange.amount_to_precision(self.symbol, new_short_qty)))
+                if price <= long_stop:  # نزدیک استاپ لانگ
+                    self.adjust_margin(short_position, new_short_qty, price)
+                    logger.info(f"Margin short increased to {new_short_qty} as long hit stop {long_stop}")
+                    sync_send_telegram_message(
+                        f"[{BRAND}] Margin short increased on {self.symbol}\nNew Quantity: {new_short_qty:.4f}\nReason: Long hit stop {long_stop:.2f}"
+                    )
+                else:
+                    self.adjust_margin(short_position, new_short_qty, price)
+
+            elif unrealized_pnl > 0:  # لانگ مثبت
+                margin_increase = pnl_percentage * 0.01  # گام 1% بر اساس درصد سود
+                new_long_qty = long_qty * (1 + margin_increase)
+                new_short_qty = short_qty * (1 - margin_increase)
+                new_long_qty = max(self.min_quantity, float(self.exchange.amount_to_precision(self.symbol, new_long_qty)))
+                new_short_qty = max(self.min_quantity, float(self.exchange.amount_to_precision(self.symbol, new_short_qty)))
+                self.adjust_margin(long_position, new_long_qty, price)
+                self.adjust_margin(short_position, new_short_qty, price)
 
     def log_balance(self, balance, price):
         timestamp = datetime.datetime.now(datetime.timezone.utc)
@@ -322,15 +364,16 @@ class TradingBot:
                 self.log_balance(balance, price)
                 self.save_dashboard_data(balance, price, rsi, atr, positions)
 
-                if self.candle_count % 5 == 0 and (long_position or short_position):
-                    for pos in [long_position, short_position]:
-                        if pos:
-                            qty = float(pos['contracts'])
-                            unrealized_pnl = float(pos.get('unrealizedPnl', 0) or 0)
-                            new_qty = qty * (1.01 if unrealized_pnl > 0 else 0.99)
-                            new_qty = max(self.min_quantity, round(new_qty, 4))
-                            self.adjust_margin(pos, new_qty, price)
+                # تنظیم مارجین اولیه در اولین پوزیشن
+                if not self.initial_margin and long_position:
+                    self.initial_long_margin = (float(long_position['contracts']) * float(long_position['entryPrice'])) / self.leverage
+                    self.initial_short_margin = (float(short_position['contracts']) * float(short_position['entryPrice'])) / self.leverage if short_position else self.initial_long_margin
 
+                # تنظیم مارجین پویا هر 5 کندل
+                if self.candle_count % 5 == 0:
+                    self.dynamic_margin_adjustment(long_position, short_position, price)
+
+                # بستن پوزیشن‌ها در صورت سود/ضرر کل
                 total_pnl = sum(float(pos.get('unrealizedPnl', 0) or 0) for pos in [long_position, short_position] if pos)
                 if total_pnl >= balance * 0.05 or total_pnl <= balance * -0.03:
                     for pos in [long_position, short_position]:
@@ -341,6 +384,7 @@ class TradingBot:
                     time.sleep(60)
                     continue
 
+                # تنظیم تریلینگ استاپ
                 for pos in [long_position, short_position]:
                     if pos:
                         entry_price = float(pos['entryPrice'])
@@ -349,7 +393,8 @@ class TradingBot:
                             trailing_distance = max(0.0075 * price, 0.5 * atr)
                             self.set_trailing_stop(pos, trailing_distance)
 
-                if not (long_position or short_position) and (rsi < 45 or rsi > 55):
+                # باز کردن پوزیشن‌های لانگ و شورت همزمان (بدون شرط RSI)
+                if not (long_position or short_position):
                     quantity = self.calculate_position_size(balance, price, stop_loss_percent=0.015)
                     if quantity < self.min_quantity:
                         logger.warning(f"{bcolors.WARNING}INSUFFICIENT MARGIN FOR POSITIONS")
