@@ -7,6 +7,10 @@ import datetime
 import logging
 import os
 from dotenv import load_dotenv
+import requests
+import hashlib
+import hmac
+import urllib.parse
 
 # لاگ‌ها
 logging.basicConfig(
@@ -118,15 +122,81 @@ class OrderBookEMABot:
                 }
             )
             order_id = order["id"]
+
             # بررسی وضعیت سفارش
             time.sleep(1)  # کمی صبر برای ثبت در سرور
             order_info = self.exchange.fetch_order(order_id, self.symbol)
+            avg_price = order_info.get("average")
             if order_info.get("filled", 0) > 0:
-                logger.info(f"{bcolors.OKCYAN}{bcolors.BOLD}{side.upper()}{bcolors.ENDC} {bcolors.OKCYAN}order FILLED: {bcolors.BOLD}{order_info['filled']}{bcolors.OKCYAN} {bcolors.ENDC} {bcolors.OKCYAN}@ avg price {bcolors.BOLD}{order_info.get('average', 'N/A')}{bcolors.ENDC}")
+                logger.info(f"{bcolors.OKCYAN}{bcolors.BOLD}{side.upper()}{bcolors.ENDC} "
+                            f"{bcolors.OKCYAN}order FILLED: {bcolors.BOLD}{order_info['filled']}{bcolors.ENDC} "
+                            f"{bcolors.OKCYAN}@ avg price {bcolors.BOLD}{avg_price}{bcolors.ENDC}")
+
+                if avg_price:
+                    self.set_trailing_stop(side, avg_price)
+                else:
+                    logger.warning(f"{bcolors.WARNING}Cannot set trailing stop: avg price not available{bcolors.ENDC}")
+
             else:
-                logger.warning(f"{bcolors.WARNING}{bcolors.BOLD}{side.upper()}{bcolors.ENDC}{bcolors.WARNING} order NOT filled yet: status={bcolors.BOLD}{order_info.get('status')}{bcolors.ENDC}")
+                logger.warning(f"{bcolors.WARNING}{bcolors.BOLD}{side.upper()}{bcolors.ENDC}"
+                               f"{bcolors.WARNING} order NOT filled yet: status={bcolors.BOLD}{order_info.get('status')}{bcolors.ENDC}")
         except Exception as e:
             logger.error(f"{bcolors.FAIL}Error placing{bcolors.BOLD} {side}{bcolors.ENDC}{bcolors.FAIL} order: {bcolors.BOLD}{e}{bcolors.ENDC}")
+
+    def set_trailing_stop(self, side, price):
+        try:
+            position_idx = 1 if side == "buy" else 2
+            trailing_distance = round(price * 0.007, 2)  # 0.7 درصد از قیمت
+
+            url = 'https://api-testnet.bybit.com/v5/position/trading-stop'
+            timestamp = str(int(time.time() * 1000))
+            params = {
+                "category": "linear",
+                "symbol": self.symbol.replace('/', ''),
+                "positionIdx": position_idx,
+                "trailingStop": str(trailing_distance),
+                "recvWindow": "60000",
+                "timestamp": timestamp
+            }
+
+            # ساخت امضا
+            query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+            signature = hmac.new(
+                bytes(API_SECRET, "utf-8"),
+                msg=bytes(query_string, "utf-8"),
+                digestmod=hashlib.sha256
+            ).hexdigest()
+
+            headers = {
+                "X-BAPI-API-KEY": API_KEY,
+                "Content-Type": "application/json"
+            }
+
+            params["sign"] = signature
+            res = requests.post(url, headers=headers, json=params)
+
+            if res.status_code == 200:
+                logger.info(f"Trailing stop set for {side.upper()} at distance: {trailing_distance}")
+            else:
+                logger.error(f"Failed to set trailing stop: {res.text}")
+
+        except Exception as e:
+            logger.error(f"Error in set_trailing_stop: {e}")
+
+    def get_open_positions(self):
+        try:
+            positions = self.exchange.fetch_positions([self.symbol], params={'category': 'linear'})
+            result = {'long': None, 'short': None}
+            for pos in positions:
+                if pos['contracts'] > 0:
+                    if pos['side'] == 'long':
+                        result['long'] = pos
+                    elif pos['side'] == 'short':
+                        result['short'] = pos
+            return result
+        except Exception as e:
+            logger.error(f"Error fetching positions: {e}")
+            return {'long': None, 'short': None}
 
 
     def run(self):
@@ -166,6 +236,30 @@ class OrderBookEMABot:
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
                 time.sleep(60)
+
+    def close_position(self, side):
+        try:
+            position_idx = 1 if side == "long" else 2
+            pos = self.get_open_positions()[side]
+            if not pos:
+                logger.info(f"No {side.upper()} position to close")
+                return
+            qty = pos['contracts']
+            close_side = 'sell' if side == "long" else 'buy'
+            order = self.exchange.create_market_order(
+                self.symbol,
+                close_side,
+                qty,
+                params={
+                    "category": "linear",
+                    "reduceOnly": True,
+                    "positionIdx": position_idx
+                }
+            )
+            logger.info(f"{bcolors.OKBLUE}Closed {side.upper()} position with qty={qty}, order ID: {order.get('id', 'N/A')}{bcolors.ENDC}")
+        except Exception as e:
+            logger.error(f"Error closing {side} position: {e}")
+            logger.error(f"Error closing {side} position: {e}")
 
 def main():
     bot = OrderBookEMABot(symbol="BTC/USDT:USDT", timeframe="5m", leverage=3, risk_percent=0.01)
