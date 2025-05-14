@@ -35,7 +35,7 @@ BRAND = "MAXIMUS"
 # تابع ارسال پیام به تلگرام
 def sync_send_telegram_message(message):
     telegram_token = TELEGRAM_TOKEN
-    chat_id = TELEGRAM_CHAT_ID  # جایگزین با chat_id واقعی
+    chat_id = TELEGRAM_CHAT_ID
     url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message}
     for attempt in range(3):
@@ -58,14 +58,14 @@ class MaximusBot:
             'secret': api_secret,
             'enableRateLimit': True,
         })
-        self.exchange.set_sandbox_mode(False)  # فعال‌سازی تست‌نت
+        self.exchange.set_sandbox_mode(False)  # حساب لایو
         self.symbol = symbol
         self.running = False
         self.candle_count = 0
         self.buy_signals = 0
         self.sell_signals = 0
         self.current_position = None
-        self.min_quantity = 0.00001  # حداقل حجم سفارش
+        self.min_quantity = 0.0001  # حداقل مقدار سفارش Bybit
         self.leverage = 10
         self.api_symbol = 'BTCUSDT'
 
@@ -101,19 +101,16 @@ class MaximusBot:
 
     def calculate_indicators(self, df_5m, df_15m):
         try:
-            # HMA (Hull Moving Average)
             def hma(series, period):
                 wma1 = series.rolling(window=period//2).mean() * 2
                 wma2 = series.rolling(window=period).mean()
                 raw_hma = wma1 - wma2
                 return raw_hma.rolling(window=int(np.sqrt(period))).mean()
 
-            # Donchian Channels
             def donchian(df, period):
                 return pd.Series(df['high'].rolling(window=period).max(), name='donchian_high'), \
                        pd.Series(df['low'].rolling(window=period).min(), name='donchian_low')
 
-            # ATR
             def atr(df, period):
                 high_low = df['high'] - df['low']
                 high_close = np.abs(df['high'] - df['close'].shift())
@@ -122,15 +119,14 @@ class MaximusBot:
                 return tr.rolling(window=period).mean()
 
             indicators = {}
-            indicators['hma_long'] = hma(df_15m['close'], 26)
+            indicators['hma_long'] = hma(df_15m['close'], 10)
             indicators['hma_short'] = hma(df_5m['close'], 9)
             indicators['donchian_high'], indicators['donchian_low'] = donchian(df_5m, 20)
-            indicators['ma50'] = df_15m['close'].rolling(window=50).mean()
-            indicators['ma200'] = df_15m['close'].rolling(window=200).mean()
-            indicators['atr'] = atr(df_5m, 14)
-            indicators['atr_avg'] = indicators['atr'].rolling(window=50).mean()
+            indicators['ma50'] = df_15m['close'].rolling(window=9).mean()
+            indicators['ma200'] = df_15m['close'].rolling(window=100).mean()
+            indicators['atr'] = atr(df_5m, 9)
+            indicators['atr_avg'] = indicators['atr'].rolling(window=14).mean()
 
-            # پر کردن مقادیر NaN
             for key in indicators:
                 indicators[key] = indicators[key].fillna(method='bfill')
 
@@ -162,7 +158,7 @@ class MaximusBot:
         try:
             positions = self.exchange.private_get_v5_position_list({
                 'category': 'linear',
-                'symbol': self.api_symbol,  # استفاده از BTCUSDT
+                'symbol': self.api_symbol,
                 'recv_window': 60000
             })['result']['list']
             result = {'long': None, 'short': None}
@@ -222,6 +218,12 @@ class MaximusBot:
 
     def run(self):
         self.set_leverage()
+        balance = self.exchange.fetch_balance(params={'recv_window': 60000})['USDT']['free']
+        logger.info(f"{bcolors.OKCYAN}INITIAL BALANCE: {balance:.2f} USDT")
+        if balance < 8.1:
+            logger.error(f"{bcolors.FAIL}INSUFFICIENT INITIAL BALANCE: {balance:.2f} USDT, Required: 8.1 USDT")
+            sync_send_telegram_message(f"[{BRAND}] Insufficient initial balance: {balance:.2f} USDT, Required: 8.1 USDT")
+            return
         self.running = True
         logger.info(f"{bcolors.OKBLUE}{BRAND} ALGOBOT {self.symbol} IN TIME FRAME 5m/15m HAS BEEN STARTED")
         sync_send_telegram_message(f"[{BRAND}] Trading bot initialized by Ali Mahmoodi\nSymbol: {self.symbol}")
@@ -285,8 +287,14 @@ class MaximusBot:
                     market_price < indicators_data['donchian_high'].iloc[-1] and balance >= min_balance):
                     self.buy_signals += 1
                     quantity = self.calculate_position_size(balance, market_price, sl_pct)
-                    if quantity < self.min_quantity:
-                        logger.warning(f"{bcolors.WARNING}INSUFFICIENT MARGIN FOR LONG POSITION")
+                    if quantity < self.min_quantity or quantity == 0:
+                        logger.warning(f"{bcolors.WARNING}INSUFFICIENT MARGIN OR INVALID QUANTITY FOR LONG POSITION: Quantity {quantity:.6f}")
+                        time.sleep(30)
+                        continue
+                    order_value = quantity * market_price
+                    margin_required = order_value / self.leverage
+                    if margin_required > balance * 0.1:
+                        logger.warning(f"{bcolors.WARNING}INSUFFICIENT BALANCE FOR LONG POSITION: Required {margin_required:.2f} USDT, Available {balance:.2f} USDT")
                         time.sleep(30)
                         continue
                     sl = market_price * (1 - sl_pct)
@@ -297,7 +305,7 @@ class MaximusBot:
                         logger.warning(f"{bcolors.WARNING}INVALID SL {sl:.2f} OR TP {tp:.2f} FOR LONG")
                         time.sleep(30)
                         continue
-                    logger.info(f"{bcolors.OKCYAN}LONG ORDER: QTY {quantity:.4f}, SL {sl:.2f}, TP {tp:.2f}")
+                    logger.info(f"{bcolors.OKCYAN}LONG ORDER: QTY {quantity:.6f}, SL {sl:.2f}, TP {tp:.2f}, MARGIN: {margin_required:.2f} USDT")
                     try:
                         order = self.exchange.create_market_buy_order(
                             self.symbol, quantity,
@@ -318,19 +326,31 @@ class MaximusBot:
                         }
                         logger.info(f"{bcolors.OKBLUE}LONG ORDER CREATED: {order}")
                         sync_send_telegram_message(
-                            f"[{BRAND}] New Long position opened on {self.symbol}\nPrice: {market_price:.2f}\nQuantity: {quantity:.4f}\nStop Loss: {sl:.2f}\nTake Profit: {tp:.2f}\nTrend: {trend}"
+                            f"[{BRAND}] New Long position opened on {self.symbol}\nPrice: {market_price:.2f}\nQuantity: {quantity:.6f}\nStop Loss: {sl:.2f}\nTake Profit: {tp:.2f}\nMargin: {margin_required:.2f} USDT\nTrend: {trend}"
                         )
                     except Exception as e:
-                        logger.error(f"{bcolors.FAIL}ERROR OPENING LONG POSITION: {e}")
-                        sync_send_telegram_message(f"[{BRAND}] Error opening long position on {self.symbol}\nError: {str(e)}")
+                        if "retCode: 110007" in str(e):
+                            logger.error(f"{bcolors.FAIL}INSUFFICIENT BALANCE FOR LONG POSITION: Required {margin_required:.2f} USDT, Available {balance:.2f} USDT")
+                            sync_send_telegram_message(
+                                f"[{BRAND}] Insufficient balance for long position on {self.symbol}\nBalance: {balance:.2f} USDT, Required: {margin_required:.2f} USDT"
+                            )
+                        else:
+                            logger.error(f"{bcolors.FAIL}ERROR OPENING LONG POSITION: {e}")
+                            sync_send_telegram_message(f"[{BRAND}] Error opening long position on {self.symbol}\nError: {str(e)}")
 
                 if (trend in ['bearish', 'range'] and not position and
                     indicators_data['hma_short'].iloc[-1] > indicators_data['hma_short'].iloc[-2] * short_hma_threshold and
                     market_price > indicators_data['donchian_low'].iloc[-1] and balance >= min_balance):
                     self.sell_signals += 1
                     quantity = self.calculate_position_size(balance, market_price, sl_pct)
-                    if quantity < self.min_quantity:
-                        logger.warning(f"{bcolors.WARNING}INSUFFICIENT MARGIN FOR SHORT POSITION")
+                    if quantity < self.min_quantity or quantity == 0:
+                        logger.warning(f"{bcolors.WARNING}INSUFFICIENT MARGIN OR INVALID QUANTITY FOR SHORT POSITION: Quantity {quantity:.6f}")
+                        time.sleep(30)
+                        continue
+                    order_value = quantity * market_price
+                    margin_required = order_value / self.leverage
+                    if margin_required > balance * 0.1:
+                        logger.warning(f"{bcolors.WARNING}INSUFFICIENT BALANCE FOR SHORT POSITION: Required {margin_required:.2f} USDT, Available {balance:.2f} USDT")
                         time.sleep(30)
                         continue
                     sl = market_price * (1 + sl_pct)
@@ -341,7 +361,7 @@ class MaximusBot:
                         logger.warning(f"{bcolors.WARNING}INVALID SL {sl:.2f} OR TP {tp:.2f} FOR SHORT")
                         time.sleep(30)
                         continue
-                    logger.info(f"{bcolors.OKCYAN}SHORT ORDER: QTY {quantity:.4f}, SL {sl:.2f}, TP {tp:.2f}")
+                    logger.info(f"{bcolors.OKCYAN}SHORT ORDER: QTY {quantity:.6f}, SL {sl:.2f}, TP {tp:.2f}, MARGIN: {margin_required:.2f} USDT")
                     try:
                         order = self.exchange.create_market_sell_order(
                             self.symbol, quantity,
@@ -362,11 +382,17 @@ class MaximusBot:
                         }
                         logger.info(f"{bcolors.OKBLUE}SHORT ORDER CREATED: {order}")
                         sync_send_telegram_message(
-                            f"[{BRAND}] New Short position opened on {self.symbol}\nPrice: {market_price:.2f}\nQuantity: {quantity:.4f}\nStop Loss: {sl:.2f}\nTake Profit: {tp:.2f}\nTrend: {trend}"
+                            f"[{BRAND}] New Short position opened on {self.symbol}\nPrice: {market_price:.2f}\nQuantity: {quantity:.6f}\nStop Loss: {sl:.2f}\nTake Profit: {tp:.2f}\nMargin: {margin_required:.2f} USDT\nTrend: {trend}"
                         )
                     except Exception as e:
-                        logger.error(f"{bcolors.FAIL}ERROR OPENING SHORT POSITION: {e}")
-                        sync_send_telegram_message(f"[{BRAND}] Error opening short position on {self.symbol}\nError: {str(e)}")
+                        if "retCode: 110007" in str(e):
+                            logger.error(f"{bcolors.FAIL}INSUFFICIENT BALANCE FOR SHORT POSITION: Required {margin_required:.2f} USDT, Available {balance:.2f} USDT")
+                            sync_send_telegram_message(
+                                f"[{BRAND}] Insufficient balance for short position on {self.symbol}\nBalance: {balance:.2f} USDT, Required: {margin_required:.2f} USDT"
+                            )
+                        else:
+                            logger.error(f"{bcolors.FAIL}ERROR OPENING SHORT POSITION: {e}")
+                            sync_send_telegram_message(f"[{BRAND}] Error opening short position on {self.symbol}\nError: {str(e)}")
 
                 if position and self.current_position:
                     current_price = market_price
@@ -392,7 +418,7 @@ class MaximusBot:
                 time.sleep(30)
 
 if __name__ == "__main__":
-    api_key = API_KEY  # جایگزین با کلید API تست‌نت
-    api_secret = API_SECRET  # جایگزین با راز API تست‌نت
+    api_key = API_KEY
+    api_secret = API_SECRET
     bot = MaximusBot(api_key, api_secret)
     bot.run()
