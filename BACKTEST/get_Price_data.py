@@ -7,12 +7,12 @@ from time import sleep
 exchange = ccxt.bybit({'enableRateLimit': True})
 
 # تایم‌فریم‌ها و مدت زمان
-timeframes = {"15m":"15m","30m":"30m","1h":"1h","4h":"4h","1d":"1d"}
+timeframes = {"1m": '1m', "5m": '5m', "15m": '15m', "30m": '30m', "1h": '1h', "4h": '4h'}
 symbol = 'BTC/USDT:USDT'
-days = 1460  # ۶ ماه (۱۸۰ روز)
+days = 2190  # ۶ ماه (۱۸۰ روز)
 
 # تاریخ شروع و پایان
-end_date = datetime.datetime(2025, 5, 1)  # ۱ مه ۲۰۲۵
+end_date = datetime.datetime(2025, 5,11)  # ۱ مه ۲۰۲۵
 start_date = end_date - datetime.timedelta(days=days)  # ۱ نوامبر ۲۰۲۴
 since = int(start_date.timestamp() * 1000)
 end_timestamp = int(end_date.timestamp() * 1000)
