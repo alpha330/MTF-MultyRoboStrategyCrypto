@@ -99,7 +99,7 @@ def sync_send_telegram_message(message):
     telegram_queue.put(message)
 
 class TradingBot:
-    def __init__(self, symbol, timeframe, leverage=3, risk_percent=0.01):
+    def __init__(self, symbol, timeframe, leverage=5, risk_percent=0.01):
         self.symbol = symbol
         self.timeframe = timeframe
         self.leverage = leverage
@@ -160,6 +160,7 @@ class TradingBot:
     def calculate_position_size(self, balance, price, stop_loss_percent=0.015):
         risk_amount = balance * self.risk_percent
         stop_loss_distance = price * stop_loss_percent
+        self.min_quantity = risk_amount / price
         if stop_loss_distance == 0:
             logger.error(f"{bcolors.WARNING}STOP LOSS DISTANCE IS ZERO")
             return 0
